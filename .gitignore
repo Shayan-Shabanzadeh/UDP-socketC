@@ -1,6 +1,9 @@
 # Prerequisites
 *.d
-
+.idea
+.DS_Store
+/client
+/server
 # Object files
 *.o
 *.ko
