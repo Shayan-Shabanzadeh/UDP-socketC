@@ -28,6 +28,8 @@ void sendJoinRequest(int socketFD, struct sockaddr_in *address,
 void sendLeaveRequest(int socketFD, struct sockaddr_in *address,
                       const char *channel_name);
 void sendListRequest(int socketFD, struct sockaddr_in *address);
+void sendWhoRequest(int socketFD, struct sockaddr_in *address,
+                    const char *channel_name);
 int handleUserInput(char *input, int socketFD, struct sockaddr_in *address,
                     char *active_channel);
 void handleServerResponse(int socketFD);
@@ -155,7 +157,6 @@ void sendJoinRequest(int socketFD, struct sockaddr_in *address,
   send_message_to_server(socketFD, &join_req, sizeof(join_req), address,
                          success_msg, error_msg);
 
-  // Update the local list of joined channels
   add_joined_channel(channel_name);
 }
 
@@ -182,6 +183,23 @@ void sendListRequest(int socketFD, struct sockaddr_in *address) {
   list_req.req_type = htonl(REQ_LIST);
   send_message_to_server(socketFD, &list_req, sizeof(list_req), address,
                          "List request sent.", "Failed to send list request");
+}
+void sendWhoRequest(int socketFD, struct sockaddr_in *address,
+                    const char *channel_name) {
+  struct request_who who_req;
+  who_req.req_type = htonl(REQ_WHO);
+  strncpy(who_req.req_channel, channel_name, CHANNEL_MAX - 1);
+  who_req.req_channel[CHANNEL_MAX - 1] = '\0';
+
+  char success_msg[BUFFER_SIZE];
+  char error_msg[BUFFER_SIZE];
+  snprintf(success_msg, sizeof(success_msg), "Who request sent for channel: %s",
+           channel_name);
+  snprintf(error_msg, sizeof(error_msg),
+           "Failed to send who request for channel: %s", channel_name);
+
+  send_message_to_server(socketFD, &who_req, sizeof(who_req), address,
+                         success_msg, error_msg);
 }
 
 int handleUserInput(char *input, int socketFD, struct sockaddr_in *address,
@@ -219,12 +237,17 @@ int handleUserInput(char *input, int socketFD, struct sockaddr_in *address,
       // Handle /list command
       else if (strncmp(input, "/list", 5) == 0) {
         sendListRequest(socketFD, address);
-      } // Handle /leave command
+      }
+      // Handle /who command
+      else if (strncmp(input, "/who ", 5) == 0) {
+        char *channel_name = input + 5;
+        sendWhoRequest(socketFD, address, channel_name);
+      }
+      // Handle /leave command
       else if (strncmp(input, "/leave ", 7) == 0) {
         char *channel_name = input + 7;
         if (is_channel_joined(channel_name)) {
           sendLeaveRequest(socketFD, address, channel_name);
-          // Remove from joined channels
           for (int i = 0; i < joined_channel_count; i++) {
             if (strcmp(joined_channels[i], channel_name) == 0) {
               for (int j = i; j < joined_channel_count - 1; j++) {
@@ -236,8 +259,6 @@ int handleUserInput(char *input, int socketFD, struct sockaddr_in *address,
             }
           }
           if (strcmp(active_channel, channel_name) == 0) {
-            // If leaving active channel, clear it or set to another joined
-            // channel if available
             if (joined_channel_count > 0) {
               strncpy(active_channel, joined_channels[0], CHANNEL_MAX - 1);
               active_channel[CHANNEL_MAX - 1] = '\0';
@@ -269,7 +290,6 @@ int handleUserInput(char *input, int socketFD, struct sockaddr_in *address,
         send_message_to_server(socketFD, &say_req, sizeof(say_req), address,
                                NULL, "Failed to send message");
       } else {
-        // No active channel for regular messages
         printf(
             "No active channel. Please join or switch to a channel first.\n");
       }
@@ -292,58 +312,74 @@ int handleUserInput(char *input, int socketFD, struct sockaddr_in *address,
 }
 
 void handleServerResponse(int socketFD) {
-    struct response_list {
-        uint32_t response_code;
-        uint32_t channel_count;
-        char channels[MAX_JOINED_CHANNELS][CHANNEL_MAX];
-    };
+  struct response_list {
+    uint32_t response_code;
+    uint32_t channel_count;
+    char channels[MAX_JOINED_CHANNELS][CHANNEL_MAX];
+  };
 
-    char buffer[sizeof(struct response_list) > sizeof(struct text_say)
-                    ? sizeof(struct response_list)
-                    : sizeof(struct text_say)];
-    int n = recvfrom(socketFD, buffer, sizeof(buffer), 0, NULL, NULL);
+  struct response_who {
+    uint32_t response_code;
+    uint32_t user_count;
+    char channel_name[CHANNEL_MAX];
+    char usernames[MAX_CLIENTS][USERNAME_MAX];
+  };
 
-    if (n >= (int)sizeof(uint32_t)) {
-        uint32_t response_code = ntohl(*(uint32_t *)buffer);
+  char buffer[sizeof(struct response_who) > sizeof(struct response_list) &&
+                      sizeof(struct response_who) > sizeof(struct text_say)
+                  ? sizeof(struct response_who)
+                  : (sizeof(struct response_list) > sizeof(struct text_say)
+                         ? sizeof(struct response_list)
+                         : sizeof(struct text_say))];
 
-        if (response_code == RESP_SUCCESS || response_code == RESP_ERROR) {
-            struct server_response *response = (struct server_response *)buffer;
-            printf("Server response: [%d] %s\n", response_code, response->response_message);
+  int n = recvfrom(socketFD, buffer, sizeof(buffer), 0, NULL, NULL);
 
-        } else if (response_code == RESP_LIST) {
-            struct response_list *list_response = (struct response_list *)buffer;
-            int channel_count = ntohl(list_response->channel_count);
-            printf("Existing channels:\n");
+  if (n >= (int)sizeof(uint32_t)) {
+    uint32_t response_code = ntohl(*(uint32_t *)buffer);
 
-            for (int i = 0; i < channel_count && i < MAX_JOINED_CHANNELS; i++) {
-                printf(" %s\n", list_response->channels[i]);
-            }
+    if (response_code == RESP_SUCCESS || response_code == RESP_ERROR) {
+      struct server_response *response = (struct server_response *)buffer;
+      printf("Server response: [%d] %s\n", response_code,
+             response->response_message);
 
-        } else if (response_code == TXT_SAY) {  // Handle chat message type
-            struct text_say *chat_message = (struct text_say *)buffer;
-            printf("[%s][%s]: %s\n", chat_message->txt_channel,
-                   chat_message->txt_username, chat_message->txt_text);
+    } else if (response_code == RESP_WHO) {
+      struct response_who *who_response = (struct response_who *)buffer;
+      int user_count = ntohl(who_response->user_count);
+      printf("Users in channel '%s' (%d):\n", who_response->channel_name,
+             user_count);
 
-        } else {
-            printf("Unknown response code received: [%d]\n", response_code);
-        }
+      for (int i = 0; i < user_count && i < MAX_CLIENTS; i++) {
+        printf(" - %s\n", who_response->usernames[i]);
+      }
+    } else if (response_code == RESP_LIST) {
+      struct response_list *list_response = (struct response_list *)buffer;
+      int channel_count = ntohl(list_response->channel_count);
+      printf("Existing channels:\n");
+
+      for (int i = 0; i < channel_count && i < MAX_JOINED_CHANNELS; i++) {
+        printf(" %s\n", list_response->channels[i]);
+      }
+
+    } else if (response_code == TXT_SAY) { 
+      struct text_say *chat_message = (struct text_say *)buffer;
+      printf("[%s][%s]: %s\n", chat_message->txt_channel,
+             chat_message->txt_username, chat_message->txt_text);
+
     } else {
-        printf("Received unknown message format or size.\n");
+      printf("Unknown response code received: [%d]\n", response_code);
     }
+  } else {
+    printf("Received unknown message format or size.\n");
+  }
 }
-
-
-
-
-
 
 int is_channel_joined(const char *channel_name) {
   for (int i = 0; i < joined_channel_count; i++) {
     if (strcmp(joined_channels[i], channel_name) == 0) {
-      return 1; // Channel is joined
+      return 1; 
     }
   }
-  return 0; // Channel is not joined
+  return 0;
 }
 
 void add_joined_channel(const char *channel_name) {

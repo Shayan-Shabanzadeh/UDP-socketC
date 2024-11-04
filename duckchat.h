@@ -2,6 +2,7 @@
 #define DUCKCHAT_H
 
 /* Path names to unix domain sockets should not be longer than this */
+#include <stdint.h>
 #ifndef UNIX_PATH_MAX
 #define UNIX_PATH_MAX 108
 #endif
@@ -17,6 +18,7 @@
 #define CHANNEL_MAX 32
 #define SAY_MAX 64
 #define BUFFER_SIZE 64
+#define MAX_CLIENTS 32
 
 /* Define some types for designating request and text codes */
 typedef int request_t;
@@ -46,11 +48,15 @@ struct request {
 #define RESP_SUCCESS 100  // Success response code
 #define RESP_ERROR 101    // Error response code
 #define RESP_LIST 102     // For list response
+#define RESP_WHO 103      // For who response
 
 struct server_response {
     int response_code;
     char response_message[BUFFER_SIZE];
 } packed;
+
+
+
 
 /* Once we've looked at req_type, we then cast the pointer to one of
  * the types below to look deeper into the structure.  Each of these

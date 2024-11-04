@@ -5,18 +5,14 @@
 #include <string.h>
 
 #define PORT 5000
-#define MAX_CLIENTS 100
 #define MAX_CHANNELS 10
 #define MAX_CHANNELS_PER_CLIENT 10
-
-// Initialize server and client structures
 
 typedef struct {
   struct sockaddr_in addr;
   char username[USERNAME_MAX];
-  char channels[MAX_CHANNELS_PER_CLIENT]
-               [CHANNEL_MAX]; // Array of joined channels
-  int channel_count;          // Number of joined channels
+  char channels[MAX_CHANNELS_PER_CLIENT][CHANNEL_MAX];
+  int channel_count;
 } client_t;
 
 client_t clients[MAX_CLIENTS];
@@ -24,8 +20,8 @@ int client_count = 0;
 
 typedef struct {
   char channel_name[CHANNEL_MAX];
-  client_t *members[MAX_CLIENTS]; // Array of pointers to clients in the channel
-  int member_count;               // Number of clients in the channel
+  client_t *members[MAX_CLIENTS];
+  int member_count;
 } channel_t;
 
 channel_t channels[MAX_CHANNELS];
@@ -41,6 +37,8 @@ void handle_join(int sockfd, struct sockaddr_in *client_addr,
 void handle_say(int sockfd, struct sockaddr_in *client_addr,
                 struct request_say *say_req);
 void handle_list(int sockfd, struct sockaddr_in *client_addr);
+void handle_who(int sockfd, struct sockaddr_in *client_addr,
+                struct request_who *who_req);
 void handle_leave(int sockfd, struct sockaddr_in *client_addr,
                   struct request_leave *leave_req);
 void add_client(struct sockaddr_in addr, const char *username);
@@ -56,8 +54,9 @@ int client_exists(struct sockaddr_in addr);
 client_t *get_client_by_address(struct sockaddr_in *addr);
 int add_channel_to_client(client_t *client, const char *channel);
 int client_is_in_channel(client_t *client, const char *channel);
+int remove_client_from_channel(channel_t *channel, client_t *client);
+channel_t *find_channel(const char *channel_name);
 
-// Main function
 int main() {
   int sockfd;
   char buffer[BUFFER_SIZE];
@@ -84,7 +83,6 @@ int main() {
   return 0;
 }
 
-// Initialize UDP socket
 void initialize_socket(struct sockaddr_in *server_addr, int *sockfd) {
   if ((*sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
     perror("Socket creation failed");
@@ -97,7 +95,6 @@ void initialize_socket(struct sockaddr_in *server_addr, int *sockfd) {
   server_addr->sin_port = htons(PORT);
 }
 
-// Bind socket to server address
 void bind_socket(int sockfd, struct sockaddr_in *server_addr) {
   if (bind(sockfd, (const struct sockaddr *)server_addr, sizeof(*server_addr)) <
       0) {
@@ -106,47 +103,47 @@ void bind_socket(int sockfd, struct sockaddr_in *server_addr) {
   }
 }
 
-// Finds or creates a channel and returns a pointer to it
 channel_t *find_or_create_channel(const char *channel_name) {
-    // Check if the channel already exists
-    for (int i = 0; i < channel_count; i++) {
-        if (strcmp(channels[i].channel_name, channel_name) == 0) {
-            return &channels[i];  // Channel exists
-        }
+  for (int i = 0; i < channel_count; i++) {
+    if (strcmp(channels[i].channel_name, channel_name) == 0) {
+      return &channels[i];
     }
+  }
 
-    // Create a new channel if it doesn't exist
-    if (channel_count < MAX_CHANNELS) {
-        strncpy(channels[channel_count].channel_name, channel_name, CHANNEL_MAX - 1);
-        channels[channel_count].channel_name[CHANNEL_MAX - 1] = '\0';
-        channels[channel_count].member_count = 0;
-        channel_count++;  // Increment the global channel count
-        return &channels[channel_count - 1];
-    }
+  if (channel_count < MAX_CHANNELS) {
+    strncpy(channels[channel_count].channel_name, channel_name,
+            CHANNEL_MAX - 1);
+    channels[channel_count].channel_name[CHANNEL_MAX - 1] = '\0';
+    channels[channel_count].member_count = 0;
+    channel_count++;
+    return &channels[channel_count - 1];
+  }
 
-    return NULL;  // Return NULL if maximum channels reached
+  return NULL;
 }
 
 void handle_request(int sockfd, char *buffer, struct sockaddr_in *client_addr) {
-    request_t req_type;
-    memcpy(&req_type, buffer, sizeof(request_t));
-    req_type = ntohl(req_type);
+  request_t req_type;
+  memcpy(&req_type, buffer, sizeof(request_t));
+  req_type = ntohl(req_type);
 
-    if (req_type == REQ_LOGIN) {
-        handle_login(sockfd, client_addr, (struct request_login *)buffer);
-    } else if (req_type == REQ_JOIN) {
-        handle_join(sockfd, client_addr, (struct request_join *)buffer);
-    } else if (req_type == REQ_SAY) {
-        handle_say(sockfd, client_addr, (struct request_say *)buffer);
-    } else if (req_type == REQ_LIST) {
-        handle_list(sockfd, client_addr);
-    } else {
-        printf("Unknown request type: %d\n", req_type); // For unhandled types
-    }
+  if (req_type == REQ_LOGIN) {
+    handle_login(sockfd, client_addr, (struct request_login *)buffer);
+  } else if (req_type == REQ_JOIN) {
+    handle_join(sockfd, client_addr, (struct request_join *)buffer);
+  } else if (req_type == REQ_SAY) {
+    handle_say(sockfd, client_addr, (struct request_say *)buffer);
+  } else if (req_type == REQ_LIST) {
+    handle_list(sockfd, client_addr);
+  } else if (req_type == REQ_WHO) {
+    handle_who(sockfd, client_addr, (struct request_who *)buffer);
+  } else if (req_type == REQ_LEAVE) {
+    handle_leave(sockfd, client_addr, (struct request_leave *)buffer);
+  } else {
+    printf("Unknown request type: %d\n", req_type);
+  }
 }
 
-
-// Updated handle_login function
 void handle_login(int sockfd, struct sockaddr_in *client_addr,
                   struct request_login *login_req) {
   if (username_exists(login_req->req_username)) {
@@ -161,22 +158,19 @@ void handle_login(int sockfd, struct sockaddr_in *client_addr,
   }
 }
 
-// Adds a client to the specified channel
 int add_client_to_channel(channel_t *channel, client_t *client) {
-    // Check if client is already in the channel
-    for (int i = 0; i < channel->member_count; i++) {
-        if (channel->members[i] == client) {
-            return 1;  // Client already in the channel
-        }
+  for (int i = 0; i < channel->member_count; i++) {
+    if (channel->members[i] == client) {
+      return 1;
     }
+  }
 
-    // Add client if there’s room
-    if (channel->member_count < MAX_CLIENTS) {
-        channel->members[channel->member_count++] = client;
-        return 1;  // Successfully added
-    }
+  if (channel->member_count < MAX_CLIENTS) {
+    channel->members[channel->member_count++] = client;
+    return 1;
+  }
 
-    return 0;  // Channel is full, failed to add
+  return 0;
 }
 
 void handle_leave(int sockfd, struct sockaddr_in *client_addr,
@@ -188,49 +182,29 @@ void handle_leave(int sockfd, struct sockaddr_in *client_addr,
     return;
   }
 
-  // Find the channel
-  channel_t *channel = find_or_create_channel(leave_req->req_channel);
+  channel_t *channel = find_channel(leave_req->req_channel);
   if (!channel) {
     send_response(sockfd, client_addr, RESP_ERROR, "Error: Channel not found.");
     return;
   }
 
-  // Remove client from the channel
-  int removed = 0;
-  for (int i = 0; i < channel->member_count; i++) {
-    if (channel->members[i] == client) {
-      for (int j = i; j < channel->member_count - 1; j++) {
-        channel->members[j] = channel->members[j + 1];
-      }
-      channel->member_count--;
-      removed = 1;
-      break;
-    }
-  }
-
-  if (removed) {
-    // Update client's channel list
-    int found = 0;
+  printf("Attempting to remove client %s from channel %s\n", client->username,
+         channel->channel_name);
+  if (remove_client_from_channel(channel, client)) {
     for (int i = 0; i < client->channel_count; i++) {
       if (strcmp(client->channels[i], leave_req->req_channel) == 0) {
         for (int j = i; j < client->channel_count - 1; j++) {
           strncpy(client->channels[j], client->channels[j + 1], CHANNEL_MAX);
         }
         client->channel_count--;
-        found = 1;
         break;
       }
     }
+    printf("User '%s' left channel '%s'.\n", client->username,
+           leave_req->req_channel);
 
-    if (found) {
-      printf("User '%s' left channel '%s'.\n", client->username,
-             leave_req->req_channel);
-      send_response(sockfd, client_addr, RESP_SUCCESS,
-                    "Left channel successfully.");
-    } else {
-      send_response(sockfd, client_addr, RESP_ERROR,
-                    "Error: User is not in the channel.");
-    }
+    send_response(sockfd, client_addr, RESP_SUCCESS,
+                  "Left channel successfully.");
   } else {
     send_response(sockfd, client_addr, RESP_ERROR,
                   "Error: User is not in the channel.");
@@ -238,71 +212,110 @@ void handle_leave(int sockfd, struct sockaddr_in *client_addr,
 }
 
 void handle_list(int sockfd, struct sockaddr_in *client_addr) {
-    // Define the structure for the list response
-    struct response_list {
-        uint32_t response_code;                    // Response code to identify list response
-        uint32_t channel_count;                    // Total number of channels
-        char channels[MAX_CHANNELS][CHANNEL_MAX];  // List of channel names
-    } list_response;
+  struct response_list {
+    uint32_t response_code;
+    uint32_t channel_count;
+    char channels[MAX_CHANNELS][CHANNEL_MAX];
+  } list_response;
 
-    // Set the response code and channel count
-    list_response.response_code = htonl(102);  // Assuming 102 is RESP_LIST
-    list_response.channel_count = htonl(channel_count);
-    printf("Total Channels: %d\n", channel_count);  // Debugging line
+  list_response.response_code = htonl(RESP_LIST);
+  list_response.channel_count = htonl(channel_count);
+  printf("Total Channels: %d\n", channel_count);
 
-    // Copy each channel name into the response structure
-    for (int i = 0; i < channel_count; i++) {
-        strncpy(list_response.channels[i], channels[i].channel_name, CHANNEL_MAX - 1);
-        list_response.channels[i][CHANNEL_MAX - 1] = '\0';  // Null-terminate
-        printf("Channel %d: %s\n", i, list_response.channels[i]);  // Debugging line
-    }
+  for (int i = 0; i < channel_count; i++) {
+    strncpy(list_response.channels[i], channels[i].channel_name,
+            CHANNEL_MAX - 1);
+    list_response.channels[i][CHANNEL_MAX - 1] = '\0';
+    printf("Channel %d: %s\n", i, list_response.channels[i]);
+  }
 
-    // Calculate the size of the data being sent
-    size_t response_size = sizeof(uint32_t) * 2 + (CHANNEL_MAX * channel_count);
-    printf("Sending %zu bytes to client\n", response_size);  // Debugging line
+  size_t response_size = sizeof(uint32_t) * 2 + (CHANNEL_MAX * channel_count);
+  printf("Sending %zu bytes to client\n", response_size);
 
-    // Send the response back to the client
-    int bytes_sent = sendto(sockfd, &list_response, response_size, 0,
-                            (struct sockaddr *)client_addr, sizeof(*client_addr));
+  int bytes_sent = sendto(sockfd, &list_response, response_size, 0,
+                          (struct sockaddr *)client_addr, sizeof(*client_addr));
 
-    // Confirm the send operation
-    if (bytes_sent < 0) {
-        perror("Failed to send list response");
-    } else {
-        printf("Sent list response with %d bytes\n", bytes_sent);
-    }
+  if (bytes_sent < 0) {
+    perror("Failed to send list response");
+  } else {
+    printf("Sent list response with %d bytes\n", bytes_sent);
+  }
 }
 
+void handle_join(int sockfd, struct sockaddr_in *client_addr,
+                 struct request_join *join_req) {
+  client_t *client = get_client_by_address(client_addr);
+  if (!client) {
+    send_response(sockfd, client_addr, RESP_ERROR,
+                  "Error: User not logged in.");
+    return;
+  }
 
+  channel_t *channel = find_or_create_channel(join_req->req_channel);
+  if (!channel) {
+    send_response(sockfd, client_addr, RESP_ERROR,
+                  "Error: Channel limit reached.");
+    return;
+  }
 
-void handle_join(int sockfd, struct sockaddr_in *client_addr, struct request_join *join_req) {
-    client_t *client = get_client_by_address(client_addr);
-    if (!client) {
-        send_response(sockfd, client_addr, RESP_ERROR, "Error: User not logged in.");
-        return;
-    }
-
-    // Check if the channel already exists or create a new one
-    channel_t *channel = find_or_create_channel(join_req->req_channel);
-    if (!channel) {
-        send_response(sockfd, client_addr, RESP_ERROR, "Error: Channel limit reached.");
-        return;
-    }
-
-    // Add the client to the channel's member list
-    if (add_client_to_channel(channel, client)) {
-        // Add the channel to the client's own list of joined channels
-        if (add_channel_to_client(client, join_req->req_channel)) {
-            printf("User '%s' joined channel '%s'.\n", client->username, join_req->req_channel);
-            send_response(sockfd, client_addr, RESP_SUCCESS, "Joined channel successfully.");
-        } else {
-            send_response(sockfd, client_addr, RESP_ERROR, "Error: Client channel limit reached.");
-        }
+  if (add_client_to_channel(channel, client)) {
+    if (add_channel_to_client(client, join_req->req_channel)) {
+      printf("User '%s' joined channel '%s'.\n", client->username,
+             join_req->req_channel);
+      send_response(sockfd, client_addr, RESP_SUCCESS,
+                    "Joined channel successfully.");
     } else {
-        send_response(sockfd, client_addr, RESP_ERROR, "Error: Could not join channel.");
+      send_response(sockfd, client_addr, RESP_ERROR,
+                    "Error: Client channel limit reached.");
     }
+  } else {
+    send_response(sockfd, client_addr, RESP_ERROR,
+                  "Error: Could not join channel.");
+  }
 }
 
+void handle_who(int sockfd, struct sockaddr_in *client_addr,
+                struct request_who *who_req) {
+  struct response_who {
+    uint32_t response_code;
+    uint32_t user_count;
+    char channel_name[CHANNEL_MAX];
+    char usernames[MAX_CLIENTS][USERNAME_MAX];
+  } who_response;
+
+  who_response.response_code = htonl(RESP_WHO);
+
+  channel_t *channel = find_channel(who_req->req_channel);
+  if (!channel) {
+    send_response(sockfd, client_addr, RESP_ERROR, "Error: Channel not found.");
+    return;
+  }
+
+  who_response.user_count = htonl(channel->member_count);
+  strncpy(who_response.channel_name, who_req->req_channel, CHANNEL_MAX);
+  who_response.channel_name[CHANNEL_MAX - 1] = '\0';
+
+  for (int i = 0; i < channel->member_count; i++) {
+    strncpy(who_response.usernames[i], channel->members[i]->username,
+            USERNAME_MAX - 1);
+    who_response.usernames[i][USERNAME_MAX - 1] = '\0';
+  }
+
+  size_t response_size = sizeof(who_response.response_code) +
+                         sizeof(who_response.user_count) +
+                         sizeof(who_response.channel_name) +
+                         (USERNAME_MAX * channel->member_count);
+
+  int bytes_sent = sendto(sockfd, &who_response, response_size, 0,
+                          (struct sockaddr *)client_addr, sizeof(*client_addr));
+  printf("Response code in host byte order is: %d\n",
+         ntohl(who_response.response_code));
+  if (bytes_sent < 0) {
+    perror("Failed to send who response");
+  } else {
+    printf("Sent who response with %d bytes\n", bytes_sent);
+  }
+}
 
 void handle_say(int sockfd, struct sockaddr_in *client_addr,
                 struct request_say *say_req) {
@@ -312,7 +325,6 @@ void handle_say(int sockfd, struct sockaddr_in *client_addr,
     printf("[%s][%s]: %s\n", say_req->req_channel, client->username,
            say_req->req_text);
 
-    // Check if the client is in the specified channel
     if (client_is_in_channel(client, say_req->req_channel)) {
       broadcast_message(say_req->req_channel, client->username,
                         say_req->req_text, sockfd);
@@ -339,7 +351,7 @@ void add_client(struct sockaddr_in addr, const char *username) {
   clients[client_count].addr = addr;
   strncpy(clients[client_count].username, username, USERNAME_MAX - 1);
   clients[client_count].username[USERNAME_MAX - 1] = '\0';
-  clients[client_count].channel_count = 0; // Initialize channel count to 0
+  clients[client_count].channel_count = 0;
   client_count++;
 }
 
@@ -353,7 +365,6 @@ void send_response(int sockfd, struct sockaddr_in *client_addr, int code,
          sizeof(*client_addr));
 }
 
-// Broadcast message to all clients in the same channel
 void broadcast_message(const char *channel, const char *username,
                        const char *message, int sockfd) {
   for (int i = 0; i < client_count; i++) {
@@ -373,7 +384,6 @@ void broadcast_message(const char *channel, const char *username,
   }
 }
 
-// Check if a client exists and retrieve username and channel
 int find_client(struct sockaddr_in *addr, char *username) {
   for (int i = 0; i < client_count; i++) {
     if (memcmp(&clients[i].addr, addr, sizeof(struct sockaddr_in)) == 0) {
@@ -388,56 +398,79 @@ int find_client(struct sockaddr_in *addr, char *username) {
 int username_exists(const char *username) {
   for (int i = 0; i < client_count; i++) {
     if (strcmp(clients[i].username, username) == 0) {
-      return 1; // Username exists
+      return 1;
     }
   }
-  return 0; // Username does not exist
+  return 0;
 }
 
-// Find client by address
 client_t *get_client_by_address(struct sockaddr_in *addr) {
   for (int i = 0; i < client_count; i++) {
     if (memcmp(&clients[i].addr, addr, sizeof(struct sockaddr_in)) == 0) {
       return &clients[i];
     }
   }
-  return NULL; // Client not found
+  return NULL;
 }
 
-// Check if a client already exists
 int client_exists(struct sockaddr_in addr) {
   for (int i = 0; i < client_count; i++) {
     if (memcmp(&clients[i].addr, &addr, sizeof(struct sockaddr_in)) == 0) {
-      return 1; // Client exists
+      return 1;
     }
   }
-  return 0; // Client does not exist
+  return 0;
 }
 
 int add_channel_to_client(client_t *client, const char *channel) {
-  // Check if already joined
   for (int i = 0; i < client->channel_count; i++) {
     if (strcmp(client->channels[i], channel) == 0) {
-      return 1; // Already a member, no need to re-add
+      return 1;
     }
   }
 
-  // Add new channel if there's room
   if (client->channel_count < MAX_CHANNELS_PER_CLIENT) {
     strncpy(client->channels[client->channel_count], channel, CHANNEL_MAX - 1);
     client->channels[client->channel_count][CHANNEL_MAX - 1] = '\0';
     client->channel_count++;
-    return 1; // Success
+    return 1;
   }
 
-  return 0; // No room for more channels
+  return 0;
 }
 
 int client_is_in_channel(client_t *client, const char *channel) {
   for (int i = 0; i < client->channel_count; i++) {
     if (strcmp(client->channels[i], channel) == 0) {
-      return 1; // Client is in the channel
+      return 1;
     }
   }
-  return 0; // Client is not in the channel
+  return 0;
+}
+
+int remove_client_from_channel(channel_t *channel, client_t *client) {
+  for (int i = 0; i < channel->member_count; i++) {
+    if (channel->members[i] == client) {
+      for (int j = i; j < channel->member_count - 1; j++) {
+        channel->members[j] = channel->members[j + 1];
+      }
+      channel->members[channel->member_count - 1] = NULL;
+      channel->member_count--;
+      printf("Debug: Removed client %s from channel %s, new member_count: %d\n",
+             client->username, channel->channel_name, channel->member_count);
+      return 1;
+    }
+  }
+  printf("Debug: Client %s not found in channel %s\n", client->username,
+         channel->channel_name);
+  return 0;
+}
+
+channel_t *find_channel(const char *channel_name) {
+  for (int i = 0; i < channel_count; i++) {
+    if (strcmp(channels[i].channel_name, channel_name) == 0) {
+      return &channels[i];
+    }
+  }
+  return NULL;
 }
