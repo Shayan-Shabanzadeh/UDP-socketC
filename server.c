@@ -94,13 +94,25 @@ void start_client_monitor() {
 }
 
 void handle_logout(client_t *client) {
-  for (int i = 0; i < client->channel_count; i++) {
-    channel_t *channel = find_channel(client->channels[i]);
-    if (channel) {
-      remove_client_from_channel(channel, client);
+    for (int i = 0; i < client->channel_count; i++) {
+        channel_t *channel = find_channel(client->channels[i]);
+        if (channel) {
+            remove_client_from_channel(channel, client);
+        }
     }
-  }
+
+    for (int i = 0; i < client_count; i++) {
+        if (&clients[i] == client) {
+            for (int j = i; j < client_count - 1; j++) {
+                clients[j] = clients[j + 1];
+            }
+            client_count--;
+            printf("Client %s fully removed from server\n", client->username);
+            break;
+        }
+    }
 }
+
 int main() {
   int sockfd;
   char buffer[BUFFER_SIZE];

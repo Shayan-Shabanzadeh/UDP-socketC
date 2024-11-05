@@ -40,7 +40,6 @@ void add_joined_channel(const char *channel_name);
 void *send_keep_alive(void *arg);
 void start_keep_alive(int socketFD, struct sockaddr_in *server_addr);
 
-
 struct keep_alive_args {
   int socketFD;
   struct sockaddr_in *server_addr;
@@ -79,7 +78,7 @@ int main(int argc, char *argv[]) {
   sendLoginRequest(username, socketFD, address);
   sendJoinRequest(socketFD, address, DEFAULT_CHANNEL);
   last_message_time = time(NULL);
-// start_keep_alive(socketFD, address);
+  start_keep_alive(socketFD, address);
 
   fd_set read_fds;
   int exit_flag = 0;
@@ -134,9 +133,8 @@ void *send_keep_alive(void *arg) {
   struct sockaddr_in *server_addr = args->server_addr;
 
   while (1) {
-    sleep(60); // Wait 60 seconds
+    sleep(60);
 
-    // Check if we need to send a keep-alive message
     if (difftime(time(NULL), last_message_time) >= 60) {
       struct request_keep_alive keep_alive;
       keep_alive.req_type = htonl(REQ_KEEP_ALIVE);
@@ -148,25 +146,21 @@ void *send_keep_alive(void *arg) {
   return NULL;
 }
 
-
 void start_keep_alive(int socketFD, struct sockaddr_in *server_addr) {
   pthread_t thread_id;
-  
-  // Allocate memory for the arguments struct
+
   struct keep_alive_args *args = malloc(sizeof(struct keep_alive_args));
   if (args == NULL) {
     perror("Failed to allocate memory for keep-alive arguments");
     exit(EXIT_FAILURE);
   }
-  
+
   args->socketFD = socketFD;
   args->server_addr = server_addr;
 
   pthread_create(&thread_id, NULL, send_keep_alive, args);
   pthread_detach(thread_id);
 }
-
-
 
 void send_message_to_server(int socketFD, const void *message,
                             size_t message_size,
