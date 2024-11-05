@@ -1,18 +1,23 @@
 #include "duckchat.h"
 #include <arpa/inet.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 
 #define PORT 5000
 #define MAX_CHANNELS 10
 #define MAX_CHANNELS_PER_CLIENT 10
+#define TIMEOUT_INTERVAL 120
 
 typedef struct {
   struct sockaddr_in addr;
   char username[USERNAME_MAX];
   char channels[MAX_CHANNELS_PER_CLIENT][CHANNEL_MAX];
   int channel_count;
+  time_t last_active;
 } client_t;
 
 client_t clients[MAX_CLIENTS];
@@ -56,7 +61,46 @@ int add_channel_to_client(client_t *client, const char *channel);
 int client_is_in_channel(client_t *client, const char *channel);
 int remove_client_from_channel(channel_t *channel, client_t *client);
 channel_t *find_channel(const char *channel_name);
+void *monitor_clients();
+void start_client_monitor();
+void handle_logout(client_t *client);
 
+void *monitor_clients() {
+  while (1) {
+    sleep(5);
+
+    time_t now = time(NULL);
+    for (int i = 0; i < client_count; i++) {
+      if (difftime(now, clients[i].last_active) >= 120) {
+        printf("Client %s timed out and is being logged out\n",
+               clients[i].username);
+        handle_logout(&clients[i]);
+        printf("Client %s forcibly logged out due to inactivity\n", clients[i].username);
+        for (int j = i; j < client_count - 1; j++) {
+          clients[j] = clients[j + 1];
+        }
+        client_count--;
+        i--;
+      }
+    }
+  }
+  return NULL;
+}
+
+void start_client_monitor() {
+  pthread_t thread_id;
+  pthread_create(&thread_id, NULL, monitor_clients, NULL);
+  pthread_detach(thread_id);
+}
+
+void handle_logout(client_t *client) {
+  for (int i = 0; i < client->channel_count; i++) {
+    channel_t *channel = find_channel(client->channels[i]);
+    if (channel) {
+      remove_client_from_channel(channel, client);
+    }
+  }
+}
 int main() {
   int sockfd;
   char buffer[BUFFER_SIZE];
@@ -67,7 +111,7 @@ int main() {
 
   socklen_t len = sizeof(client_addr);
   printf("Server running and waiting for messages...\n");
-
+  start_client_monitor();
   while (1) {
     int n = recvfrom(sockfd, buffer, BUFFER_SIZE - 1, 0,
                      (struct sockaddr *)&client_addr, &len);
@@ -123,6 +167,10 @@ channel_t *find_or_create_channel(const char *channel_name) {
 }
 
 void handle_request(int sockfd, char *buffer, struct sockaddr_in *client_addr) {
+  client_t *client = get_client_by_address(client_addr);
+  if (client) {
+    client->last_active = time(NULL);
+  }
   request_t req_type;
   memcpy(&req_type, buffer, sizeof(request_t));
   req_type = ntohl(req_type);
@@ -139,6 +187,11 @@ void handle_request(int sockfd, char *buffer, struct sockaddr_in *client_addr) {
     handle_who(sockfd, client_addr, (struct request_who *)buffer);
   } else if (req_type == REQ_LEAVE) {
     handle_leave(sockfd, client_addr, (struct request_leave *)buffer);
+  } else if (req_type == REQ_KEEP_ALIVE) {
+    // does nothing only update last active time.
+  } else if (req_type == REQ_LOGOUT) {
+    printf("Logout request received from %s\n", client->username);
+    handle_logout(client);
   } else {
     printf("Unknown request type: %d\n", req_type);
   }
@@ -188,8 +241,9 @@ void handle_leave(int sockfd, struct sockaddr_in *client_addr,
     return;
   }
 
-  printf("Attempting to remove client %s from channel %s\n", client->username,
+  printf("Client %s is attempting to leave channel %s\n", client->username,
          channel->channel_name);
+
   if (remove_client_from_channel(channel, client)) {
     for (int i = 0; i < client->channel_count; i++) {
       if (strcmp(client->channels[i], leave_req->req_channel) == 0) {
@@ -200,7 +254,7 @@ void handle_leave(int sockfd, struct sockaddr_in *client_addr,
         break;
       }
     }
-    printf("User '%s' left channel '%s'.\n", client->username,
+    printf("Client %s left channel %s\n", client->username,
            leave_req->req_channel);
 
     send_response(sockfd, client_addr, RESP_SUCCESS,
@@ -456,7 +510,7 @@ int remove_client_from_channel(channel_t *channel, client_t *client) {
       }
       channel->members[channel->member_count - 1] = NULL;
       channel->member_count--;
-      printf("Debug: Removed client %s from channel %s, new member_count: %d\n",
+      printf("Removed client %s from channel %s, new member_count: %d\n",
              client->username, channel->channel_name, channel->member_count);
       return 1;
     }

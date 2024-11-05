@@ -1,6 +1,7 @@
 #include "duckchat.h"
 #include "raw.h"
 #include <arpa/inet.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,7 @@
 #define PORT 5000
 #define DEFAULT_CHANNEL "Common"
 #define MAX_JOINED_CHANNELS 10
+time_t last_message_time;
 char joined_channels[MAX_JOINED_CHANNELS][CHANNEL_MAX];
 int joined_channel_count = 1;
 
@@ -35,6 +37,14 @@ int handleUserInput(char *input, int socketFD, struct sockaddr_in *address,
 void handleServerResponse(int socketFD);
 int is_channel_joined(const char *channel_name);
 void add_joined_channel(const char *channel_name);
+void *send_keep_alive(void *arg);
+void start_keep_alive(int socketFD, struct sockaddr_in *server_addr);
+
+
+struct keep_alive_args {
+  int socketFD;
+  struct sockaddr_in *server_addr;
+};
 
 int main(int argc, char *argv[]) {
   if (argc != 4) {
@@ -68,6 +78,8 @@ int main(int argc, char *argv[]) {
 
   sendLoginRequest(username, socketFD, address);
   sendJoinRequest(socketFD, address, DEFAULT_CHANNEL);
+  last_message_time = time(NULL);
+// start_keep_alive(socketFD, address);
 
   fd_set read_fds;
   int exit_flag = 0;
@@ -115,6 +127,46 @@ struct sockaddr_in *createIPv4Address(char *ip, int port) {
 
   return addr;
 }
+
+void *send_keep_alive(void *arg) {
+  struct keep_alive_args *args = (struct keep_alive_args *)arg;
+  int socketFD = args->socketFD;
+  struct sockaddr_in *server_addr = args->server_addr;
+
+  while (1) {
+    sleep(60); // Wait 60 seconds
+
+    // Check if we need to send a keep-alive message
+    if (difftime(time(NULL), last_message_time) >= 60) {
+      struct request_keep_alive keep_alive;
+      keep_alive.req_type = htonl(REQ_KEEP_ALIVE);
+      sendto(socketFD, &keep_alive, sizeof(keep_alive), 0,
+             (struct sockaddr *)server_addr, sizeof(*server_addr));
+      printf("Keep alive sent\n");
+    }
+  }
+  return NULL;
+}
+
+
+void start_keep_alive(int socketFD, struct sockaddr_in *server_addr) {
+  pthread_t thread_id;
+  
+  // Allocate memory for the arguments struct
+  struct keep_alive_args *args = malloc(sizeof(struct keep_alive_args));
+  if (args == NULL) {
+    perror("Failed to allocate memory for keep-alive arguments");
+    exit(EXIT_FAILURE);
+  }
+  
+  args->socketFD = socketFD;
+  args->server_addr = server_addr;
+
+  pthread_create(&thread_id, NULL, send_keep_alive, args);
+  pthread_detach(thread_id);
+}
+
+
 
 void send_message_to_server(int socketFD, const void *message,
                             size_t message_size,
@@ -360,7 +412,7 @@ void handleServerResponse(int socketFD) {
         printf(" %s\n", list_response->channels[i]);
       }
 
-    } else if (response_code == TXT_SAY) { 
+    } else if (response_code == TXT_SAY) {
       struct text_say *chat_message = (struct text_say *)buffer;
       printf("[%s][%s]: %s\n", chat_message->txt_channel,
              chat_message->txt_username, chat_message->txt_text);
@@ -376,7 +428,7 @@ void handleServerResponse(int socketFD) {
 int is_channel_joined(const char *channel_name) {
   for (int i = 0; i < joined_channel_count; i++) {
     if (strcmp(joined_channels[i], channel_name) == 0) {
-      return 1; 
+      return 1;
     }
   }
   return 0;
