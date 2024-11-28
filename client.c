@@ -1,439 +1,723 @@
-#include "duckchat.h"
-#include "raw.h"
-#include <arpa/inet.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/select.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netdb.h>
 #include <unistd.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <ctype.h>
+#include <fcntl.h>
+#include <iostream>
+#include <time.h>
+#include <string>
+#include <map>
 
-#define PORT 5000
-#define DEFAULT_CHANNEL "Common"
-#define MAX_JOINED_CHANNELS 10
-time_t last_message_time;
-char joined_channels[MAX_JOINED_CHANNELS][CHANNEL_MAX];
-int joined_channel_count = 1;
+using namespace std;
 
-int createUDPIpv4Socket() { return socket(AF_INET, SOCK_DGRAM, 0); }
 
-struct sockaddr_in *createIPv4Address(char *ip, int port);
-void send_message_to_server(int socketFD, const void *message,
-                            size_t message_size,
-                            struct sockaddr_in *server_addr,
-                            const char *success_msg, const char *error_msg);
-void sendLoginRequest(char *username, int socketFD,
-                      struct sockaddr_in *address);
-void sendJoinRequest(int socketFD, struct sockaddr_in *address,
-                     const char *channel_name);
+#include "raw.h"
+#include "duckchat.h"
 
-void sendLeaveRequest(int socketFD, struct sockaddr_in *address,
-                      const char *channel_name);
-void sendListRequest(int socketFD, struct sockaddr_in *address);
-void sendWhoRequest(int socketFD, struct sockaddr_in *address,
-                    const char *channel_name);
-int handleUserInput(char *input, int socketFD, struct sockaddr_in *address,
-                    char *active_channel);
-void handleServerResponse(int socketFD);
-int is_channel_joined(const char *channel_name);
-void add_joined_channel(const char *channel_name);
-void *send_keep_alive(void *arg);
-void start_keep_alive(int socketFD, struct sockaddr_in *server_addr);
+#define HOSTNAME_MAX 100
+#define STDIN 0  			/* file descriptor for standard input */
+#define MAX_MESSAGE_LEN 65536
 
-struct keep_alive_args {
-  int socketFD;
-  struct sockaddr_in *server_addr;
-};
 
-int main(int argc, char *argv[]) {
-  if (argc != 4) {
-    printf("Usage: %s <server_ip> <port> <username>\n", argv[0]);
-    return -1;
-  }
+int s; //socket
+struct sockaddr_in server; //server address
+int cont; //continue to loop
+char active_channel[CHANNEL_MAX]; //active channel
 
-  char *server_ip = argv[1];
-  int port = atoi(argv[2]);
-  char *username = argv[3];
-  char active_channel[CHANNEL_MAX] = DEFAULT_CHANNEL;
-  char input[BUFFER_SIZE];
 
-  if (raw_mode() < 0) {
-    perror("Failed to enter raw mode");
-    exit(EXIT_FAILURE);
-  }
-  atexit(cooked_mode);
+map<string,string> subscribed_channels;
 
-  int socketFD = createUDPIpv4Socket();
-  if (socketFD < 0) {
-    perror("Failed to create socket");
-    exit(EXIT_FAILURE);
-  }
 
-  struct sockaddr_in *address = createIPv4Address(server_ip, port);
-  if (address == NULL) {
-    close(socketFD);
-    exit(EXIT_FAILURE);
-  }
 
-  sendLoginRequest(username, socketFD, address);
-  sendJoinRequest(socketFD, address, DEFAULT_CHANNEL);
-  last_message_time = time(NULL);
-  start_keep_alive(socketFD, address);
 
-  fd_set read_fds;
-  int exit_flag = 0;
-  while (!exit_flag) {
-    FD_ZERO(&read_fds);
-    FD_SET(STDIN_FILENO, &read_fds);
-    FD_SET(socketFD, &read_fds);
+int send_login_message(char* username);
+int send_join_message(char* channel);
+int send_say_message(char* channel, char* text);
+void handle_user_input();
+void handle_server_input();
+int send_leave_message(char* channel);
+int send_logout_message();
+int send_list_message();
+int send_who_message(char* channel);
+int send_keep_alive_message();
 
-    int activity = select(socketFD + 1, &read_fds, NULL, NULL, NULL);
-    if (activity < 0) {
-      perror("select error");
-      continue;
-    }
 
-    if (FD_ISSET(STDIN_FILENO, &read_fds)) {
-      exit_flag = handleUserInput(input, socketFD, address, active_channel);
-    }
 
-    if (FD_ISSET(socketFD, &read_fds)) {
-      handleServerResponse(socketFD);
-    }
-  }
+int main(int argc, char *argv[])
+{
 
-  free(address);
-  close(socketFD);
-  return 0;
+	
+	if (argc != 4)
+	{
+		printf("Usage: ./client server_socket server_port username\n");
+		exit(1);
+	}
+
+	char hostname[HOSTNAME_MAX];
+	int port;
+	char username[USERNAME_MAX];
+
+	strcpy(hostname, argv[1]);
+	port = atoi(argv[2]);
+	strcpy(username, argv[3]);
+
+
+
+	
+	s = socket(PF_INET, SOCK_DGRAM, 0);
+	if (s < 0)
+	{
+		perror ("socket() failed\n");
+		exit(1);
+	}
+	else
+	{
+		//printf("socket created\n");
+	}
+
+	
+	struct hostent     *he;
+
+
+
+	server.sin_family = AF_INET;
+	server.sin_port = htons(port);
+
+	if ((he = gethostbyname(hostname)) == NULL) {
+		puts("error resolving hostname..");
+		exit(1);
+	}
+	memcpy(&server.sin_addr, he->h_addr_list[0], he->h_length);
+
+	//send login message
+
+	
+	int err = send_login_message(username);
+	if (err)
+	{
+		printf("Message failed\n");
+	}
+	else
+	{
+		//printf("Message succeeded\n");
+	}
+
+	//send join message
+
+	strcpy(active_channel,"Common");
+	err = send_join_message(active_channel);
+	if (err)
+	{
+		printf("Message failed\n");
+	}
+	else
+	{
+		//printf("Message succeeded\n");
+	}
+
+	printf(">"); //the prompt
+
+	raw_mode(); //character mode
+
+	fflush(stdout);
+
+	
+	cont = 1;
+
+	
+
+	
+
+
+	while (cont)
+	{
+		//do this while continue and call the appropriate function
+
+		fflush(stdout);
+		int rc;
+		fd_set fds;
+		
+
+		FD_ZERO(&fds);
+		FD_SET(STDIN, &fds);
+		FD_SET(s, &fds);
+		
+
+
+		rc = select(s+1, &fds, NULL, NULL, NULL);
+		
+
+		
+		if (rc < 0)
+		{
+			printf("error in select\n");
+		}
+		else
+		{
+			int user_data = 0;
+			int server_data = 0;
+
+			if (FD_ISSET(STDIN,&fds))
+			{
+				//printf("stdin input available\n");
+				handle_user_input();
+				
+				user_data = 1;
+
+			}
+
+			if (FD_ISSET(s,&fds))
+			{
+				//printf("Getting server input\n");
+				handle_server_input();
+				server_data = 1;
+			}
+
+		
+		}
+
+
+
+	}
+
+
+
+	cooked_mode(); //line mode
+
+
+
+	return 0;
 }
 
-struct sockaddr_in *createIPv4Address(char *ip, int port) {
-  struct sockaddr_in *addr = malloc(sizeof(struct sockaddr_in));
-  if (addr == NULL) {
-    perror("Failed to allocate memory");
-    return NULL;
-  }
 
-  memset(addr, 0, sizeof(struct sockaddr_in));
-  addr->sin_family = AF_INET;
-  addr->sin_port = htons(port);
+int send_login_message(char* username)
+{
+	ssize_t bytes;
+	void *data;
+	size_t len;
 
-  if (inet_pton(AF_INET, ip, &addr->sin_addr.s_addr) <= 0) {
-    perror("Invalid IP address");
-    free(addr);
-    return NULL;
-  }
+	struct request_login login_msg;
+	login_msg.req_type = REQ_LOGIN;
+	strcpy(login_msg.req_username,username);
+	data = &login_msg;
 
-  return addr;
+	len = sizeof login_msg;
+
+	//bytes = send(s, data, len, 0);
+	bytes = sendto(s, data, len, 0, (struct sockaddr*)&server, sizeof server);
+
+	if (bytes < 0)
+	{
+		return 1; //error
+	}
+	else
+	{
+		return 0;
+	}
+
 }
 
-void *send_keep_alive(void *arg) {
-  struct keep_alive_args *args = (struct keep_alive_args *)arg;
-  int socketFD = args->socketFD;
-  struct sockaddr_in *server_addr = args->server_addr;
+int send_join_message(char* channel)
+{
+	ssize_t bytes;
+	void *data;
+	size_t len;
 
-  while (1) {
-    sleep(60);
+	struct request_join join_msg;
+	join_msg.req_type = REQ_JOIN;
+	strcpy(join_msg.req_channel,channel);
+	data = &join_msg;
 
-    if (difftime(time(NULL), last_message_time) >= 60) {
-      struct request_keep_alive keep_alive;
-      keep_alive.req_type = htonl(REQ_KEEP_ALIVE);
-      sendto(socketFD, &keep_alive, sizeof(keep_alive), 0,
-             (struct sockaddr *)server_addr, sizeof(*server_addr));
-      printf("Keep alive sent\n");
-    }
-  }
-  return NULL;
+	len = sizeof join_msg;
+
+	bytes = sendto(s, data, len, 0, (struct sockaddr*)&server, sizeof server);
+
+	if (bytes < 0)
+	{
+		return 1; //error
+	}
+	else
+	{
+		strcpy(active_channel,channel);
+
+		string joined_channel = string(channel);
+		subscribed_channels[joined_channel] = joined_channel; //add to the list of subscribed channels
+
+		return 0;
+
+	}
+
+
 }
 
-void start_keep_alive(int socketFD, struct sockaddr_in *server_addr) {
-  pthread_t thread_id;
+int send_leave_message(char* channel)
+{
+	ssize_t bytes;
+	void *data;
+	size_t len;
 
-  struct keep_alive_args *args = malloc(sizeof(struct keep_alive_args));
-  if (args == NULL) {
-    perror("Failed to allocate memory for keep-alive arguments");
-    exit(EXIT_FAILURE);
-  }
+	struct request_leave msg;
+	msg.req_type = REQ_LEAVE;
 
-  args->socketFD = socketFD;
-  args->server_addr = server_addr;
+	strcpy(msg.req_channel,channel);
+	data = &msg;
 
-  pthread_create(&thread_id, NULL, send_keep_alive, args);
-  pthread_detach(thread_id);
+	len = sizeof msg;
+
+	bytes = sendto(s, data, len, 0, (struct sockaddr*)&server, sizeof server);
+
+	if (bytes < 0)
+	{
+		return 1; //error
+	}
+	else
+	{
+		if (strcmp(channel,active_channel) == 0)
+		{
+			active_channel[0] = '\0';;
+		}
+
+
+
+		string leaving_channel = string(channel);
+		map<string,string>::iterator channel_iter;
+		channel_iter = subscribed_channels.find(leaving_channel);
+		if (channel_iter != subscribed_channels.end())
+		{
+			subscribed_channels.erase(channel_iter);
+		}
+		return 0;
+	}
+
+
 }
 
-void send_message_to_server(int socketFD, const void *message,
-                            size_t message_size,
-                            struct sockaddr_in *server_addr,
-                            const char *success_msg, const char *error_msg) {
-  ssize_t bytes_sent =
-      sendto(socketFD, message, message_size, 0,
-             (const struct sockaddr *)server_addr, sizeof(*server_addr));
+int send_logout_message()
+{
+	ssize_t bytes;
+	void *data;
+	size_t len;
 
-  if (bytes_sent < 0) {
-    perror(error_msg ? error_msg : "Failed to send message");
-  } else if (success_msg) {
-    printf("%s\n", success_msg);
-  }
+	struct request_logout msg;
+	msg.req_type = REQ_LOGOUT;
+
+	data = &msg;
+
+	len = sizeof msg;
+
+	bytes = sendto(s, data, len, 0, (struct sockaddr*)&server, sizeof server);
+
+	if (bytes < 0)
+	{
+		return 1; //error
+	}
+	else
+	{
+		return 0;
+	}
+
+
 }
 
-void sendLoginRequest(char *username, int socketFD,
-                      struct sockaddr_in *address) {
-  struct request_login login_req;
-  login_req.req_type = htonl(REQ_LOGIN);
-  strncpy(login_req.req_username, username, USERNAME_MAX);
-  send_message_to_server(socketFD, &login_req, sizeof(login_req), address,
-                         "Login request sent.", "Failed to send login request");
+
+
+int send_list_message()
+{
+	ssize_t bytes;
+	void *data;
+	size_t len;
+
+	struct request_logout msg;
+	msg.req_type = REQ_LIST;
+
+	data = &msg;
+
+	len = sizeof msg;
+
+	bytes = sendto(s, data, len, 0, (struct sockaddr*)&server, sizeof server);
+
+	if (bytes < 0)
+	{
+		return 1; //error
+	}
+	else
+	{
+		return 0;
+	}
+
+
 }
 
-void sendJoinRequest(int socketFD, struct sockaddr_in *address,
-                     const char *channel_name) {
-  struct request_join join_req;
-  join_req.req_type = htonl(REQ_JOIN);
-  strncpy(join_req.req_channel, channel_name, CHANNEL_MAX - 1);
-  join_req.req_channel[CHANNEL_MAX - 1] = '\0';
 
-  char success_msg[BUFFER_SIZE];
-  char error_msg[BUFFER_SIZE];
-  snprintf(success_msg, sizeof(success_msg),
-           "Join request sent for channel: %s", channel_name);
-  snprintf(error_msg, sizeof(error_msg),
-           "Failed to send join request for channel: %s", channel_name);
+int send_who_message(char* channel)
+{
+	ssize_t bytes;
+	void *data;
+	size_t len;
 
-  send_message_to_server(socketFD, &join_req, sizeof(join_req), address,
-                         success_msg, error_msg);
+	struct request_leave msg;
+	msg.req_type = REQ_WHO;
+	strcpy(msg.req_channel,channel);
+	data = &msg;
 
-  add_joined_channel(channel_name);
+	len = sizeof msg;
+
+	bytes = sendto(s, data, len, 0, (struct sockaddr*)&server, sizeof server);
+
+	if (bytes < 0)
+	{
+		return 1; //error
+	}
+	else
+	{
+		return 0;
+	}
+
+
 }
 
-void sendLeaveRequest(int socketFD, struct sockaddr_in *address,
-                      const char *channel_name) {
-  struct request_leave leave_req;
-  leave_req.req_type = htonl(REQ_LEAVE);
-  strncpy(leave_req.req_channel, channel_name, CHANNEL_MAX - 1);
-  leave_req.req_channel[CHANNEL_MAX - 1] = '\0';
+int send_say_message(char* text)
+{
+	ssize_t bytes;
+	void *data;
+	size_t len;
 
-  char success_msg[BUFFER_SIZE];
-  char error_msg[BUFFER_SIZE];
-  snprintf(success_msg, sizeof(success_msg),
-           "Leave request sent for channel: %s", channel_name);
-  snprintf(error_msg, sizeof(error_msg),
-           "Failed to send leave request for channel: %s", channel_name);
+	struct request_say say_msg;
+	say_msg.req_type = REQ_SAY;
+	strcpy(say_msg.req_channel,active_channel);
+	strcpy(say_msg.req_text,text);
+	data = &say_msg;
 
-  send_message_to_server(socketFD, &leave_req, sizeof(leave_req), address,
-                         success_msg, error_msg);
+	len = sizeof say_msg;
+
+	bytes = sendto(s, data, len, 0, (struct sockaddr*)&server, sizeof server);
+
+	if (bytes < 0)
+	{
+		return 1; //error
+	}
+	else
+	{
+		return 0;
+	}
+
 }
 
-void sendListRequest(int socketFD, struct sockaddr_in *address) {
-  struct request_list list_req;
-  list_req.req_type = htonl(REQ_LIST);
-  send_message_to_server(socketFD, &list_req, sizeof(list_req), address,
-                         "List request sent.", "Failed to send list request");
-}
-void sendWhoRequest(int socketFD, struct sockaddr_in *address,
-                    const char *channel_name) {
-  struct request_who who_req;
-  who_req.req_type = htonl(REQ_WHO);
-  strncpy(who_req.req_channel, channel_name, CHANNEL_MAX - 1);
-  who_req.req_channel[CHANNEL_MAX - 1] = '\0';
 
-  char success_msg[BUFFER_SIZE];
-  char error_msg[BUFFER_SIZE];
-  snprintf(success_msg, sizeof(success_msg), "Who request sent for channel: %s",
-           channel_name);
-  snprintf(error_msg, sizeof(error_msg),
-           "Failed to send who request for channel: %s", channel_name);
+void handle_user_input()
+{
+		//write reading from stdin into a separate function
+		// -body of the loop
 
-  send_message_to_server(socketFD, &who_req, sizeof(who_req), address,
-                         success_msg, error_msg);
-}
+		int count = 0;
+		char userinput[SAY_MAX];
+		char c = '\0';
 
-int handleUserInput(char *input, int socketFD, struct sockaddr_in *address,
-                    char *active_channel) {
-  int exit_flag = 0;
-  int input_index = 0;
-  char ch;
+		while (c != '\n')
+		{
+			c = getchar();
+			if ((c != '\n') && (count < SAY_MAX-1))
+			{
+				userinput[count] = c;
+				putchar(c);
+				count++;
+			}
 
-  while (read(STDIN_FILENO, &ch, 1) == 1) {
-    if (ch == '\n') {
-      input[input_index] = '\0';
-      printf("\n");
-      fflush(stdout);
+		}
 
-      // Handle /join command
-      if (strncmp(input, "/join ", 6) == 0) {
-        char *new_channel = input + 6;
-        sendJoinRequest(socketFD, address, new_channel);
-        add_joined_channel(new_channel);
-        strncpy(active_channel, new_channel, CHANNEL_MAX - 1);
-        active_channel[CHANNEL_MAX - 1] = '\0';
+		userinput[count] = '\0';
+		printf("\n");
 
-        // Handle /switch command
-      } else if (strncmp(input, "/switch ", 8) == 0) {
-        char *channel_name = input + 8;
-        if (is_channel_joined(channel_name)) {
-          strncpy(active_channel, channel_name, CHANNEL_MAX - 1);
-          active_channel[CHANNEL_MAX - 1] = '\0';
-          printf("Switched to channel: %s\n", active_channel);
-        } else {
-          printf("Error: Not subscribed to channel '%s'.\n", channel_name);
-        }
+		//verifying that input is read correctly
+		/*
+		printf("\n");
+		printf("user input: ");
+		printf(userinput);
+		printf("\n");
+		*/
 
-      }
-      // Handle /list command
-      else if (strncmp(input, "/list", 5) == 0) {
-        sendListRequest(socketFD, address);
-      }
-      // Handle /who command
-      else if (strncmp(input, "/who ", 5) == 0) {
-        char *channel_name = input + 5;
-        sendWhoRequest(socketFD, address, channel_name);
-      }
-      // Handle /leave command
-      else if (strncmp(input, "/leave ", 7) == 0) {
-        char *channel_name = input + 7;
-        if (is_channel_joined(channel_name)) {
-          sendLeaveRequest(socketFD, address, channel_name);
-          for (int i = 0; i < joined_channel_count; i++) {
-            if (strcmp(joined_channels[i], channel_name) == 0) {
-              for (int j = i; j < joined_channel_count - 1; j++) {
-                strncpy(joined_channels[j], joined_channels[j + 1],
-                        CHANNEL_MAX);
-              }
-              joined_channel_count--;
-              break;
-            }
-          }
-          if (strcmp(active_channel, channel_name) == 0) {
-            if (joined_channel_count > 0) {
-              strncpy(active_channel, joined_channels[0], CHANNEL_MAX - 1);
-              active_channel[CHANNEL_MAX - 1] = '\0';
-            } else {
-              active_channel[0] = '\0';
-            }
-          }
-        } else {
-          printf("Error: Not subscribed to channel '%s'.\n", channel_name);
-        }
+		if (userinput[0] == '/')
+		{
+			//special command
+			char* remainder = strchr(userinput, '/');
+			remainder = &remainder[1];
+			//printf("special command: ");
+			//printf(remainder);
+			//printf("\n");
 
-        // Handle /exit command
-      } else if (strncmp(input, "/exit", 5) == 0) {
-        struct request_logout logout_req;
-        logout_req.req_type = htonl(REQ_LOGOUT);
-        send_message_to_server(socketFD, &logout_req, sizeof(logout_req),
-                               address, "Logout request sent",
-                               "Failed to send logout request");
-        exit_flag = 1;
+			if (strcmp(remainder, "exit") == 0)
+			{
+				//printf("exit message: ");
+				//printf("\n");
+				int err = send_logout_message();
+				if (err)
+				{
+					printf("Message failed\n");
+				}
+				cont = 0;
+			}
+			else if (strcmp(remainder, "list") == 0)
+			{
+				//printf("list message: ");
+				//printf("\n");
+				int err = send_list_message();
+				if (err)
+				{
+					printf("Message failed\n");
+				}
+			}
+			else
+			{
+				char* parameter = strchr(remainder, ' ');
 
-        // Handle regular chat message, only if an active channel is set
-      } else if (strlen(active_channel) > 0) {
-        struct request_say say_req;
-        say_req.req_type = htonl(REQ_SAY);
-        strncpy(say_req.req_channel, active_channel, CHANNEL_MAX - 1);
-        say_req.req_channel[CHANNEL_MAX - 1] = '\0';
-        strncpy(say_req.req_text, input, SAY_MAX - 1);
-        say_req.req_text[SAY_MAX - 1] = '\0';
-        send_message_to_server(socketFD, &say_req, sizeof(say_req), address,
-                               NULL, "Failed to send message");
-      } else {
-        printf(
-            "No active channel. Please join or switch to a channel first.\n");
-      }
+				if (parameter != NULL)
+				{
+					if (strlen(parameter) > 1)
+					{
+						parameter = &parameter[1];
+						//printf("parameter: ");
+						//printf(parameter);
+						//printf("\n");
 
-      input_index = 0;
-      break;
-    } else if (ch == 127 || ch == '\b') {
-      if (input_index > 0) {
-        input_index--;
-        printf("\b \b");
-        fflush(stdout);
-      }
-    } else if (input_index < BUFFER_SIZE - 1) {
-      input[input_index++] = ch;
-      printf("%c", ch);
-      fflush(stdout);
-    }
-  }
-  return exit_flag;
-}
+						if (strncmp(remainder, "join ", 5) == 0)
+						{
+							//printf("join message");
+							//printf("\n");
+							int err = send_join_message(parameter);
+							if (err)
+							{
+								printf("Message failed\n");
+							}
+							else
+							{
+							strcpy(active_channel,parameter);
+							}
 
-void handleServerResponse(int socketFD) {
-  struct response_list {
-    uint32_t response_code;
-    uint32_t channel_count;
-    char channels[MAX_JOINED_CHANNELS][CHANNEL_MAX];
-  };
 
-  struct response_who {
-    uint32_t response_code;
-    uint32_t user_count;
-    char channel_name[CHANNEL_MAX];
-    char usernames[MAX_CLIENTS][USERNAME_MAX];
-  };
+						}
+						else if (strncmp(remainder, "leave ", 6) == 0)
+						{
 
-  char buffer[sizeof(struct response_who) > sizeof(struct response_list) &&
-                      sizeof(struct response_who) > sizeof(struct text_say)
-                  ? sizeof(struct response_who)
-                  : (sizeof(struct response_list) > sizeof(struct text_say)
-                         ? sizeof(struct response_list)
-                         : sizeof(struct text_say))];
+							//printf("leave message");
+							//printf("\n");
+							int err = send_leave_message(parameter);
+							if (err)
+							{
+								printf("Message failed\n");
+							}
+							//channel[0] = '\0';
 
-  int n = recvfrom(socketFD, buffer, sizeof(buffer), 0, NULL, NULL);
+						}
+						else if (strncmp(remainder, "who ", 4) == 0)
+						{
 
-  if (n >= (int)sizeof(uint32_t)) {
-    uint32_t response_code = ntohl(*(uint32_t *)buffer);
+							//printf("who message");
+							//printf("\n");
+							int err = send_who_message(parameter);
+							if (err)
+							{
+								printf("Message failed\n");
+							}
 
-    if (response_code == RESP_SUCCESS || response_code == RESP_ERROR) {
-      struct server_response *response = (struct server_response *)buffer;
-      printf("Server response: [%d] %s\n", response_code,
-             response->response_message);
 
-    } else if (response_code == RESP_WHO) {
-      struct response_who *who_response = (struct response_who *)buffer;
-      int user_count = ntohl(who_response->user_count);
-      printf("Users in channel '%s' (%d):\n", who_response->channel_name,
-             user_count);
+						}
+						else if (strncmp(remainder, "switch ", 7) == 0)
+						{
+							//printf("Switch message\n");
+							string switching_channel = string(parameter);
+							map<string,string>::iterator channel_iter;
+							channel_iter = subscribed_channels.find(switching_channel);
+							if (channel_iter == subscribed_channels.end())
+							{
+								cout << "You have not subscribed to channel " << switching_channel << endl;
+							}
+							else
+							{
+								strcpy(active_channel, parameter);
+							}
 
-      for (int i = 0; i < user_count && i < MAX_CLIENTS; i++) {
-        printf(" - %s\n", who_response->usernames[i]);
-      }
-    } else if (response_code == RESP_LIST) {
-      struct response_list *list_response = (struct response_list *)buffer;
-      int channel_count = ntohl(list_response->channel_count);
-      printf("Existing channels:\n");
 
-      for (int i = 0; i < channel_count && i < MAX_JOINED_CHANNELS; i++) {
-        printf(" %s\n", list_response->channels[i]);
-      }
 
-    } else if (response_code == TXT_SAY) {
-      struct text_say *chat_message = (struct text_say *)buffer;
-      printf("[%s][%s]: %s\n", chat_message->txt_channel,
-             chat_message->txt_username, chat_message->txt_text);
+						}else
+						{
+							printf("*Unknown command");
+							printf("\n");
+						}
 
-    } else {
-      printf("Unknown response code received: [%d]\n", response_code);
-    }
-  } else {
-    printf("Received unknown message format or size.\n");
-  }
-}
 
-int is_channel_joined(const char *channel_name) {
-  for (int i = 0; i < joined_channel_count; i++) {
-    if (strcmp(joined_channels[i], channel_name) == 0) {
-      return 1;
-    }
-  }
-  return 0;
+
+
+
+
+					}else
+					{
+						printf("*Unknown command");
+						printf("\n");
+					}
+
+
+				}
+				else
+				{
+					printf("*Unknown command");
+					printf("\n");
+				}
+
+
+
+
+
+			}
+
+
+
+		}
+		else
+		{
+			//say message
+			//printf("say message");
+			//printf("\n");
+			if (active_channel[0] != '\0')
+			{
+				int err = send_say_message(userinput);
+				if (err)
+				{
+					printf("Message failed\n");
+				}
+				else
+				{
+					//printf("Message succeeded\n");
+				}
+			}
+
+
+
+		}
+		//printf("\n");
+		printf(">");
+
 }
 
-void add_joined_channel(const char *channel_name) {
-  if (!is_channel_joined(channel_name) &&
-      joined_channel_count < MAX_JOINED_CHANNELS) {
-    strncpy(joined_channels[joined_channel_count], channel_name,
-            CHANNEL_MAX - 1);
-    joined_channels[joined_channel_count][CHANNEL_MAX - 1] = '\0';
-    joined_channel_count++;
-  }
+void handle_server_input()
+{
+
+	struct sockaddr_in recv_server;
+	ssize_t bytes;
+	void *data;
+	size_t len;
+	socklen_t fromlen;
+	fromlen = sizeof(recv_server);
+	char recv_text[MAX_MESSAGE_LEN];
+	data = &recv_text;
+	len = sizeof recv_text;
+
+
+	bytes = recvfrom(s, data, len, 0, (struct sockaddr*)&server, &fromlen);
+
+
+	if (bytes < 0)
+	{
+		perror ("recvfrom failed\n");
+	}
+	else
+	{
+		//printf("%s",(char *)data);
+		//printf("\n");
+		printf("\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b");
+
+
+		struct text* recv_text;
+		recv_text = (struct text*)data;
+		//struct text recv_text;
+		//recv_text = *(struct text *)data;
+
+
+		//printf("Message Type:");
+		text_t message_type = recv_text->txt_type;
+		//printf("%d", message_type);
+		//printf("\n");
+
+
+		if (message_type == TXT_SAY)
+		{
+			struct text_say* say_text;
+			say_text = (struct text_say*)data;
+			//printf("Say message :");
+			printf("[");
+			printf("%s", say_text->txt_channel);
+			printf("][");
+			printf("%s",say_text->txt_username);
+			printf("]: ");
+			printf("%s",say_text->txt_text);
+			printf("\n>");
+		}
+		else if (message_type == TXT_LIST)
+		{
+			struct text_list* list_text;
+			list_text = (struct text_list*)data;
+
+			printf("Existing channels:\n");
+			int no_of_channels = list_text->txt_nchannels;
+			struct channel_info* channel;
+			int i;
+			channel = list_text->txt_channels;
+			for (i=0; i<no_of_channels; i++)
+			{
+				printf(" ");
+				printf("%s",(channel+i)->ch_channel);
+				printf("\n");
+
+
+			}
+
+			printf(">");
+
+		}
+		else if (message_type == TXT_WHO)
+		{
+			struct text_who* who_text;
+			who_text = (struct text_who*)data;
+
+			printf("Users on channel ");
+			printf("%s",who_text->txt_channel);
+			printf(":\n");
+			int no_of_users = who_text->txt_nusernames;
+			struct user_info* user;
+			int i;
+			user = who_text->txt_users;
+			for (i=0; i<no_of_users; i++)
+			{
+				printf(" ");
+				printf("%s",(user+i)->us_username);
+				printf("\n");
+
+
+			}
+
+			printf(">");
+
+		}
+		else if (message_type == TXT_ERROR)
+		{
+			struct text_error* error_text;
+			error_text = (struct text_error*)data;
+
+			printf("Error: ");
+			printf("%s",error_text->txt_error);
+			printf("\n");
+			printf(">");
+
+		}
+
+
+
+	}
+
 }
+
+
