@@ -159,10 +159,10 @@ int main(int argc, char *argv[]) {
         neighbor.ip_port = neighbor_ip + ":" + to_string(neighbor_port);
         neighbors.push_back(neighbor);
 
-        printf("Added neighbor: %s:%d\n", neighbor_ip.c_str(), neighbor_port);
+        // printf("Added neighbor: %s:%d\n", neighbor_ip.c_str(), neighbor_port);
     }
 
-    printf("Server initialized on %s:%d\n", hostname, port);
+    // printf("Server initialized on %s:%d\n", hostname, port);
 
     // Create default channel "Common"
     string default_channel = "Common";
@@ -271,8 +271,8 @@ void handle_socket_input() {
                 break;
             }
             case REQ_S2S_LEAVE:
-            printf("S2S Leave %s\n", ((struct request_s2s_leave*)data)->req_channel);   
-
+                printf("S2S Leave %s\n", ((struct request_s2s_leave*)data)->req_channel);   
+                break;
             default:
                 printf("*Unknown command*\n");
                 break;
@@ -436,7 +436,6 @@ void handle_join_message(void *data, struct sockaddr_in sock) {
     if (is_client) {
         // This is a client join
         string username = rev_usernames[key];
-        // printf("server: %s joins channel %s\n", username.c_str(), channel.c_str());
 
         // Add the client to the channel
         if (channels.find(channel) == channels.end()) {
@@ -444,29 +443,34 @@ void handle_join_message(void *data, struct sockaddr_in sock) {
         }
         channels[channel][username] = sock;
 
-        // Forward the join as an S2S Join
-        send_s2s_join(channel, sock);
+        // Check if the server is already subscribed to the channel
+        if (server_subscriptions[channel].empty()) {
+            // Forward the join as an S2S Join only if not already subscribed
+            send_s2s_join(channel, sock);
+        }
     } else {
         // This is an S2S Join
         handle_s2s_join(data, sock);
     }
 }
 
-void handle_s2s_join(void *data, struct sockaddr_in origin) {
+
+void handle_s2s_join(void *data, struct sockaddr_in origin) { 
     struct request_s2s_join* msg = (struct request_s2s_join*)data;
     string channel = msg->req_channel;
 
-    // printf("server: Received S2S Join for channel %s from %s:%d\n",
-    //        channel.c_str(),
-    //        inet_ntoa(origin.sin_addr),
-    //        ntohs(origin.sin_port));
-
-    // Subscribe to the channel if not already subscribed
+    // Ensure the channel exists in both `channels` and `server_subscriptions`
     if (channels.find(channel) == channels.end()) {
         channels[channel] = map<string, struct sockaddr_in>();
-        server_subscriptions[channel].insert(origin);
-        printf("server: Subscribed to channel %s\n", channel.c_str());
     }
+
+    // Check if the server is already subscribed to the channel
+    if (server_subscriptions[channel].count(origin) > 0) {
+        return; // Stop further processing
+    }
+
+    // Add the origin to the subscription list
+    server_subscriptions[channel].insert(origin);
 
     // Broadcast the S2S Join to other neighbors, excluding the origin
     struct request_s2s_join s2s_join_msg;
@@ -486,10 +490,17 @@ void handle_s2s_join(void *data, struct sockaddr_in origin) {
         if (bytes < 0) {
             perror("Failed to send S2S Join message");
         } else {
-            printf("Broadcasted S2S Join for %s to %s\n", channel.c_str(), neighbor.ip_port.c_str());
+            // Print the broadcast message in the specified format
+            printf("%s:%d %s:%d send S2S Join %s\n",
+                   inet_ntoa(server.sin_addr), ntohs(server.sin_port), // Local server IP and port
+                   inet_ntoa(neighbor.addr.sin_addr), ntohs(neighbor.addr.sin_port), // Neighbor server IP and port
+                   channel.c_str()); // Channel name
         }
     }
 }
+
+
+
 
 void send_s2s_join(const string& channel, struct sockaddr_in origin) {
     struct request_s2s_join s2s_join_msg;
@@ -652,21 +663,38 @@ void send_s2s_leave(const string& channel, const struct sockaddr_in& dest) {
 
 
 void handle_s2s_leave(void *data, struct sockaddr_in source) {
+    printf("hello world\n");
     struct request_s2s_leave* leave_msg = (struct request_s2s_leave*)data;
     string channel = leave_msg->req_channel;
 
+    // Normalize the source address (zero out unused fields for comparison)
+    struct sockaddr_in normalized_source = source;
+    memset(&(normalized_source.sin_zero), 0, sizeof(normalized_source.sin_zero));
+
     // Remove the source from the subscription list for the channel
     if (server_subscriptions.find(channel) != server_subscriptions.end()) {
-        server_subscriptions[channel].erase(source);
+        auto& subscribers = server_subscriptions[channel];
 
-        // If no servers are subscribed, clean up
-        if (server_subscriptions[channel].empty()) {
-            server_subscriptions.erase(channel);
+        // Check if the source exists in the subscription list
+        auto iter = subscribers.find(normalized_source);
+        if (iter != subscribers.end()) {
+            subscribers.erase(iter);
+            printf("Removed %s:%d from channel '%s'\n",
+                   inet_ntoa(source.sin_addr), ntohs(source.sin_port), channel.c_str());
+
+            // If no servers are subscribed, clean up
+            if (subscribers.empty()) {
+                server_subscriptions.erase(channel);
+                printf("No more subscribers for channel '%s'. Removed from server subscriptions.\n", channel.c_str());
+            }
+        } else {
+            printf("Source %s:%d not found in subscriptions for channel '%s'\n",
+                   inet_ntoa(source.sin_addr), ntohs(source.sin_port), channel.c_str());
         }
+    } else {
+        printf("Channel '%s' not found in server subscriptions\n", channel.c_str());
     }
 }
-
-
 
 
 
