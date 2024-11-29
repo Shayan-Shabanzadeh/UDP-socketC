@@ -59,8 +59,10 @@ struct request_s2s_say {
     request_t req_type;               /* = REQ_S2S_SAY */
     char req_channel[CHANNEL_MAX];   /* Channel name */
     char req_text[SAY_MAX];          /* Message text */
-    char req_message_id[64];         /* Unique message ID (e.g., generated using a timestamp) */
+    char req_message_id[64];         /* Unique message ID */
+    char req_username[USERNAME_MAX]; /* Client username */
 } packed;
+
 
 
 struct request_s2s_leave {

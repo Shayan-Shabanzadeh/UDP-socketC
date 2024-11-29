@@ -73,7 +73,7 @@ void handle_s2s_join(void *data, struct sockaddr_in origin) ;
 bool is_subscribed_to_channel(const string& channel, const struct sockaddr_in& source);
 
 void send_s2s_join(const string& channel, struct sockaddr_in origin);
-void send_s2s_say(const string& channel, const string& text, const struct sockaddr_in& source);
+void send_s2s_say(const string& channel, const string& text, const string& username, const struct sockaddr_in& source);
 
 void handle_s2s_say(void *data, struct sockaddr_in source) ;
 
@@ -216,13 +216,13 @@ void handle_socket_input() {
         request_t message_type = request_msg->req_type;
 
         // Print server IP:port and client IP:port
-        printf("%s:%d %s:%d recv Request ", inet_ntoa(server.sin_addr), ntohs(server.sin_port), ip.c_str(), port);
+        printf("%s:%d %s:%d recv ", inet_ntoa(server.sin_addr), ntohs(server.sin_port), ip.c_str(), port);
 
         // Handle specific request types
         switch (message_type) {
             case REQ_LOGIN: {
                 const char* username = ((struct request_login*)data)->req_username;
-                printf("login %s\n", username);
+                printf("Request login %s\n", username);
                 break;
             }
             case REQ_JOIN: {
@@ -236,45 +236,38 @@ void handle_socket_input() {
 
                 if (iter != rev_usernames.end()) {
                     string username = iter->second;
-                    printf("join %s %s\n", username.c_str(), channel);
+                    printf("Request join %s %s\n", username.c_str(), channel);
                 } else {
                     printf("join Unknown_User %s\n", channel);
                 }
                 break;
             }
             case REQ_LEAVE:
-                printf("leave %s\n", ((struct request_leave*)data)->req_channel);
+                printf("Request leave %s\n", ((struct request_leave*)data)->req_channel);
                 break;
             case REQ_SAY:
-                printf("say %s %s\n", ((struct request_say*)data)->req_channel,
+                printf("Request say %s \"%s\"\n", ((struct request_say*)data)->req_channel,
                        ((struct request_say*)data)->req_text);
                 break;
             case REQ_LIST:
-                printf("list\n");
+                printf("Request list\n");
                 break;
             case REQ_WHO:
-                printf("who %s\n", ((struct request_who*)data)->req_channel);
+                printf("Request who %s\n", ((struct request_who*)data)->req_channel);
                 break;
             case REQ_S2S_JOIN:
-                printf("s2s join %s\n", ((struct request_s2s_join*)data)->req_channel);
+                printf("S2S join %s\n", ((struct request_s2s_join*)data)->req_channel);
                 break;
             case REQ_S2S_SAY: {
+                struct request_s2s_say* s2s_msg = (struct request_s2s_say*)data;
 
-                char port_str[6];
-                sprintf(port_str, "%d", port);
-                string key = ip + ":" + port_str;
-                auto iter = rev_usernames.find(key);
+                const char* channel = s2s_msg->req_channel;
+                const char* text = s2s_msg->req_text;
+                const char* username = s2s_msg->req_username; // Extract the username directly from the message
 
-                if (iter != rev_usernames.end()) {
-                    string username = iter->second;
-                    const char* channel = ((struct request_s2s_say*)data)->req_channel;
-                    const char* text = ((struct request_s2s_say*)data)->req_text;
-                    printf("S2S say %s %s \"%s\"\n", username.c_str(),channel, text);
-                } else {
-                    // const char* channel = ((struct request_s2s_say*)data)->req_channel;
-                    printf("S2S say Unknown_User");
-                }
+                printf("S2S say %s %s \"%s\"\n", username, channel, text);
 
+                // Optionally handle forwarding or further processing here
                 break;
             }
             case REQ_S2S_LEAVE:
@@ -579,6 +572,7 @@ void handle_s2s_say(void *data, struct sockaddr_in source) {
     struct request_s2s_say* s2s_msg = (struct request_s2s_say*)data;
     string channel = s2s_msg->req_channel;
     string text = s2s_msg->req_text;
+    string username = s2s_msg->req_username;
 
     // TODO this must be randomized
     // Unique message ID
@@ -610,7 +604,7 @@ void handle_s2s_say(void *data, struct sockaddr_in source) {
 
     // Forward to neighbors if necessary
     if (!is_subscribed_to_channel(channel, source)) {
-        send_s2s_say(channel, text, source);
+        send_s2s_say(channel, text, username,source);
     } else {
         // Send S2S_LEAVE back if no subscribers
         send_s2s_leave(channel, source);
@@ -714,17 +708,20 @@ void handle_say_message(void *data, struct sockaddr_in sock)
         }
     }
 
-     send_s2s_say(channel, text, sock);
+     send_s2s_say(channel, text,username, sock);
 
 }
 
 
 
-void send_s2s_say(const string& channel, const string& text, const struct sockaddr_in& source) {
+void send_s2s_say(const string& channel, const string& text, const string& username, const struct sockaddr_in& source) {
     struct request_s2s_say s2s_say_msg;
     s2s_say_msg.req_type = REQ_S2S_SAY;
+
+    // Populate the fields in the S2S SAY message
     strncpy(s2s_say_msg.req_channel, channel.c_str(), CHANNEL_MAX - 1);
     strncpy(s2s_say_msg.req_text, text.c_str(), SAY_MAX - 1);
+    strncpy(s2s_say_msg.req_username, username.c_str(), USERNAME_MAX - 1);
 
     for (const auto& neighbor : neighbors) {
         if (neighbor.addr.sin_addr.s_addr == source.sin_addr.s_addr &&
@@ -732,11 +729,12 @@ void send_s2s_say(const string& channel, const string& text, const struct sockad
             continue; // Don't send back to source
         }
 
-        ssize_t bytes = sendto(s, &s2s_say_msg, sizeof(s2s_say_msg), 0, 
+        // Send the message to the neighbor
+        ssize_t bytes = sendto(s, &s2s_say_msg, sizeof(s2s_say_msg), 0,
                                (struct sockaddr*)&neighbor.addr, sizeof(neighbor.addr));
         if (bytes < 0) {
             perror("Failed to send S2S SAY message to neighbor");
-        }else{
+        } else {
             printf("%s:%d %s:%d send S2S say %s\n",
                    inet_ntoa(server.sin_addr), ntohs(server.sin_port), // Local server IP and port
                    inet_ntoa(neighbor.addr.sin_addr), ntohs(neighbor.addr.sin_port), // Neighbor server IP and port
@@ -744,6 +742,7 @@ void send_s2s_say(const string& channel, const string& text, const struct sockad
         }
     }
 }
+
 
 
 
