@@ -15,10 +15,21 @@
 #include <iostream>
 #include <set>
 #include <time.h>
+#include <chrono>
+
 
 
 using namespace std;
 
+
+struct sockaddr_in_comparator {
+    bool operator()(const struct sockaddr_in& a, const struct sockaddr_in& b) const {
+        if (a.sin_addr.s_addr != b.sin_addr.s_addr) {
+            return a.sin_addr.s_addr < b.sin_addr.s_addr;
+        }
+        return a.sin_port < b.sin_port;
+    }
+};
 
 
 //#include "hash.h"
@@ -42,6 +53,9 @@ map<string,int> active_usernames; //0-inactive , 1-active
 map<string,string> rev_usernames; //<ip+port in string, username>
 map<string,channel_type> channels;
 
+std::set<std::string> seen_message_ids;
+map<string, set<struct sockaddr_in, sockaddr_in_comparator> > server_subscriptions;
+
 
 
 
@@ -56,8 +70,16 @@ void handle_who_message(void *data, struct sockaddr_in sock);
 void handle_keep_alive_message(struct sockaddr_in sock);
 void send_error_message(struct sockaddr_in sock, string error_msg);
 void handle_s2s_join(void *data, struct sockaddr_in origin) ;
+bool is_subscribed_to_channel(const string& channel, const struct sockaddr_in& source);
 
 void send_s2s_join(const string& channel, struct sockaddr_in origin);
+void send_s2s_say(const string& channel, const string& text, const struct sockaddr_in& source);
+
+void handle_s2s_say(void *data, struct sockaddr_in source) ;
+
+void send_s2s_leave(const string& channel, const struct sockaddr_in& dest);
+void handle_s2s_leave(void *data, struct sockaddr_in source) ;
+
 
 
 // Define a structure to hold neighbor server information
@@ -75,6 +97,9 @@ set<string> processed_requests;
 bool is_processed(const string& request_id) {
     return processed_requests.find(request_id) != processed_requests.end();
 }
+
+
+
 
 void mark_as_processed(const string& request_id) {
     processed_requests.insert(request_id);
@@ -233,6 +258,28 @@ void handle_socket_input() {
             case REQ_S2S_JOIN:
                 printf("s2s join %s\n", ((struct request_s2s_join*)data)->req_channel);
                 break;
+            case REQ_S2S_SAY: {
+
+                char port_str[6];
+                sprintf(port_str, "%d", port);
+                string key = ip + ":" + port_str;
+                auto iter = rev_usernames.find(key);
+
+                if (iter != rev_usernames.end()) {
+                    string username = iter->second;
+                    const char* channel = ((struct request_s2s_say*)data)->req_channel;
+                    const char* text = ((struct request_s2s_say*)data)->req_text;
+                    printf("S2S say %s %s \"%s\"\n", username.c_str(),channel, text);
+                } else {
+                    // const char* channel = ((struct request_s2s_say*)data)->req_channel;
+                    printf("S2S say Unknown_User");
+                }
+
+                break;
+            }
+            case REQ_S2S_LEAVE:
+            printf("S2S Leave %s\n", ((struct request_s2s_leave*)data)->req_channel);   
+
             default:
                 printf("*Unknown command*\n");
                 break;
@@ -264,6 +311,12 @@ void handle_socket_input() {
             case REQ_S2S_JOIN:
                 handle_s2s_join(data, recv_client);
                 break;
+            case REQ_S2S_SAY:
+                handle_s2s_say(data, recv_client);
+                break;
+            case REQ_S2S_LEAVE:
+                handle_s2s_leave(data, recv_client);
+                break;
             default:
                 send_error_message(recv_client, "*Unknown command");
                 break;
@@ -275,9 +328,14 @@ void handle_socket_input() {
 
 void handle_login_message(void *data, struct sockaddr_in sock) {
     struct request_login* msg = (struct request_login*)data;
-
-    // Extract username from the login message
     string username = msg->req_username;
+
+    // Validate username
+    if (username.empty()) {
+        send_error_message(sock, "Login failed: Empty username");
+        printf("Login failed: Empty username\n");
+        return;
+    }
 
     // Save the sockaddr_in for this username
     usernames[username] = sock;
@@ -285,10 +343,9 @@ void handle_login_message(void *data, struct sockaddr_in sock) {
     // Mark the username as active
     active_usernames[username] = 1;
 
-    // Construct the key for rev_usernames using the IP and port
+    // Construct the key for rev_usernames
     string ip = inet_ntoa(sock.sin_addr);
-    int port = ntohs(sock.sin_port);  // Convert port to host byte order
-
+    int port = ntohs(sock.sin_port);
     char port_str[6];
     sprintf(port_str, "%d", port);
     string key = ip + ":" + port_str;
@@ -297,8 +354,9 @@ void handle_login_message(void *data, struct sockaddr_in sock) {
     rev_usernames[key] = username;
 
     // Debugging output
-    // printf("server: %s logs in from %s:%d (key: %s)\n", username.c_str(), ip.c_str(), port, key.c_str());
+    // printf("Login: Username %s logged in with key %s\n", username.c_str(), key.c_str());
 }
+
 
 
 void handle_logout_message(struct sockaddr_in sock)
@@ -312,23 +370,11 @@ void handle_logout_message(struct sockaddr_in sock)
 
  	char port_str[6];
  	sprintf(port_str, "%d", port);
-	//cout << "port: " << port_str << endl;
 
 	string key = ip + "." +port_str;
-	//cout << "key: " << key <<endl;
 
 	//check whether key is in rev_usernames
 	map <string,string> :: iterator iter;
-
-	/*
-    for(iter = rev_usernames.begin(); iter != rev_usernames.end(); iter++)
-    {
-        cout << "key: " << iter->first << " username: " << iter->second << endl;
-    }
-	*/
-
-
-
 
 	iter = rev_usernames.find(key);
 	if (iter == rev_usernames.end() )
@@ -351,8 +397,6 @@ void handle_logout_message(struct sockaddr_in sock)
 		map<string,channel_type>::iterator channel_iter;
 		for(channel_iter = channels.begin(); channel_iter != channels.end(); channel_iter++)
 		{
-			//cout << "key: " << iter->first << " username: " << iter->second << endl;
-			//channel_type current_channel = channel_iter->second;
 			map<string,struct sockaddr_in>::iterator within_channel_iterator;
 			within_channel_iterator = channel_iter->second.find(username);
 			if (within_channel_iterator != channel_iter->second.end())
@@ -361,31 +405,26 @@ void handle_logout_message(struct sockaddr_in sock)
 			}
 
 		}
-
-
-		//remove entry from active usernames also
-		//active_usernames[username] = 1;
 		map<string,int>::iterator active_user_iter;
 		active_user_iter = active_usernames.find(username);
 		active_usernames.erase(active_user_iter);
-
-
-		// cout << "server: " << username << " logs out" << endl;
 	}
 
 
-	/*
-    for(iter = rev_usernames.begin(); iter != rev_usernames.end(); iter++)
-    {
-        cout << "key: " << iter->first << " username: " << iter->second << endl;
-    }
-	*/
-
-
-	//if so delete it and delete username from usernames
-	//if not send an error message - later
-
 }
+
+
+bool is_subscribed_to_channel(const string& channel, const struct sockaddr_in& source) {
+    if (channels.find(channel) != channels.end() && !channels[channel].empty()) {
+        return true;
+    }
+    if (server_subscriptions.find(channel) != server_subscriptions.end() &&
+        server_subscriptions[channel].count(source)) {
+        return true;
+    }
+    return false;
+}
+
 
 void handle_join_message(void *data, struct sockaddr_in sock) {
     struct request_join* msg = (struct request_join*)data;
@@ -432,6 +471,7 @@ void handle_s2s_join(void *data, struct sockaddr_in origin) {
     // Subscribe to the channel if not already subscribed
     if (channels.find(channel) == channels.end()) {
         channels[channel] = map<string, struct sockaddr_in>();
+        server_subscriptions[channel].insert(origin);
         printf("server: Subscribed to channel %s\n", channel.c_str());
     }
 
@@ -485,12 +525,6 @@ void send_s2s_join(const string& channel, struct sockaddr_in origin) {
 }
 
 
-
-
-
-
-
-
 void handle_leave_message(void *data, struct sockaddr_in sock) {
     struct request_leave* msg = (struct request_leave*)data;
     string channel = msg->req_channel;
@@ -541,83 +575,176 @@ void handle_leave_message(void *data, struct sockaddr_in sock) {
 }
 
 
+void handle_s2s_say(void *data, struct sockaddr_in source) {
+    struct request_s2s_say* s2s_msg = (struct request_s2s_say*)data;
+    string channel = s2s_msg->req_channel;
+    string text = s2s_msg->req_text;
+
+    // TODO this must be randomized
+    // Unique message ID
+    string message_id = channel + ":" + text + ":" + inet_ntoa(source.sin_addr) + ":" + to_string(ntohs(source.sin_port));
+
+    if (seen_message_ids.find(message_id) != seen_message_ids.end()) {
+        printf("Duplicate S2S SAY message detected. Ignoring.\n");
+        return;
+    }
+    seen_message_ids.insert(message_id);
+
+    // Forward to local clients if subscribed
+    if (channels.find(channel) != channels.end()) {
+        auto& users = channels[channel];
+        for (const auto& [username, client_sock] : users) {
+            struct text_say send_msg;
+            send_msg.txt_type = TXT_SAY;
+            strncpy(send_msg.txt_channel, channel.c_str(), CHANNEL_MAX - 1);
+            strncpy(send_msg.txt_username, username.c_str(), USERNAME_MAX - 1);
+            strncpy(send_msg.txt_text, text.c_str(), SAY_MAX - 1);
+
+            ssize_t bytes = sendto(s, &send_msg, sizeof(send_msg), 0, 
+                                   (struct sockaddr*)&client_sock, sizeof(client_sock));
+            if (bytes < 0) {
+                perror("Failed to forward SAY message to client");
+            }
+        }
+    }
+
+    // Forward to neighbors if necessary
+    if (!is_subscribed_to_channel(channel, source)) {
+        send_s2s_say(channel, text, source);
+    } else {
+        // Send S2S_LEAVE back if no subscribers
+        send_s2s_leave(channel, source);
+    }
+}
+
+
+void send_s2s_leave(const string& channel, const struct sockaddr_in& dest) {
+    struct request_s2s_leave s2s_leave_msg;
+    s2s_leave_msg.req_type = REQ_S2S_LEAVE;
+    strncpy(s2s_leave_msg.req_channel, channel.c_str(), CHANNEL_MAX - 1);
+
+    ssize_t bytes = sendto(s, &s2s_leave_msg, sizeof(s2s_leave_msg), 0, 
+                           (struct sockaddr*)&dest, sizeof(dest));
+    if (bytes < 0) {
+        perror("Failed to send S2S LEAVE message");
+    }
+}
+
+
+void handle_s2s_leave(void *data, struct sockaddr_in source) {
+    struct request_s2s_leave* leave_msg = (struct request_s2s_leave*)data;
+    string channel = leave_msg->req_channel;
+
+    // Remove the source from the subscription list for the channel
+    if (server_subscriptions.find(channel) != server_subscriptions.end()) {
+        server_subscriptions[channel].erase(source);
+
+        // If no servers are subscribed, clean up
+        if (server_subscriptions[channel].empty()) {
+            server_subscriptions.erase(channel);
+        }
+    }
+}
 
 
 
 
-void handle_say_message(void *data, struct sockaddr_in sock) {
-    // Get the message fields
+
+
+void handle_say_message(void *data, struct sockaddr_in sock)
+{
+
+    
+    // Extract message fields
     struct request_say* msg = (struct request_say*)data;
-
     string channel = msg->req_channel;
     string text = msg->req_text;
 
-    // Extract IP and port from sockaddr_in
-    string ip = inet_ntoa(sock.sin_addr);
-    int port = ntohs(sock.sin_port);  // Convert port to host byte order
 
-    // Construct the key for rev_usernames
+    string ip = inet_ntoa(sock.sin_addr);
+    int port = ntohs(sock.sin_port);
+
     char port_str[6];
     sprintf(port_str, "%d", port);
     string key = ip + ":" + port_str;
 
-    // Check if the user is logged in
-    auto iter = rev_usernames.find(key);
-    if (iter == rev_usernames.end()) {
-        // IP and port not recognized - send an error message
-        send_error_message(sock, "Not logged in");
-        return;
-    }
 
-    string username = rev_usernames[key];
-    active_usernames[username] = 1;
+    // Check if the client is recognized
+    auto user_iter = rev_usernames.find(key);
+    // if (rev_usernames.find(key) != rev_usernames.end()) {
+    //     send_error_message(sock, "Say Not logged in");
+    //     return;
+    // }
+
+    string username = user_iter->second;
+    active_usernames[username] = 1; // Mark the user as active
 
     // Check if the channel exists
     auto channel_iter = channels.find(channel);
     if (channel_iter == channels.end()) {
-        // Channel not found
         send_error_message(sock, "No channel by the name " + channel);
-        // cout << "server: " << username << " trying to send a message to non-existent channel " << channel << endl;
         return;
     }
-
-    // Check if the user is in the channel
-    auto channel_user_iter = channels[channel].find(username);
-    if (channel_user_iter == channels[channel].end()) {
-        // User not in the channel
+    if (username.empty()) {
+    send_error_message(sock, "Username is empty");
+    return;
+    }
+    // Check if the user is a member of the channel
+    auto& channel_users = channels[channel];
+    auto channel_user_iter = channel_users.find(username);
+    if (channel_user_iter == channel_users.end()) {
         send_error_message(sock, "You are not in channel " + channel);
-        // cout << "server: " << username << " trying to send a message to channel " << channel
-        //      << " where they are not a member" << endl;
         return;
     }
 
-    // Send the message to all members of the channel
-    auto& existing_channel_users = channels[channel];
-    for (auto& channel_user : existing_channel_users) {
-        const string& recipient_username = channel_user.first;
-        const struct sockaddr_in& recipient_sock = channel_user.second;
-
+    // Forward the message to all users in the channel
+    for (auto& [member_username, member_sock] : channel_users) {
         struct text_say send_msg;
         send_msg.txt_type = TXT_SAY;
 
-        // Fill in the message details
         strncpy(send_msg.txt_channel, channel.c_str(), CHANNEL_MAX - 1);
-        send_msg.txt_channel[CHANNEL_MAX - 1] = '\0';
         strncpy(send_msg.txt_username, username.c_str(), USERNAME_MAX - 1);
-        send_msg.txt_username[USERNAME_MAX - 1] = '\0';
         strncpy(send_msg.txt_text, text.c_str(), SAY_MAX - 1);
-        send_msg.txt_text[SAY_MAX - 1] = '\0';
 
-        ssize_t bytes = sendto(s, &send_msg, sizeof(send_msg), 0, (struct sockaddr*)&recipient_sock,
-                               sizeof(recipient_sock));
+        ssize_t bytes = sendto(s, &send_msg, sizeof(send_msg), 0, 
+                               (struct sockaddr*)&member_sock, sizeof(member_sock));
 
         if (bytes < 0) {
             perror("Message failed");
         }
     }
 
-    // cout << "server: " << username << " sends say message in " << channel << endl;
+     send_s2s_say(channel, text, sock);
+
 }
+
+
+
+void send_s2s_say(const string& channel, const string& text, const struct sockaddr_in& source) {
+    struct request_s2s_say s2s_say_msg;
+    s2s_say_msg.req_type = REQ_S2S_SAY;
+    strncpy(s2s_say_msg.req_channel, channel.c_str(), CHANNEL_MAX - 1);
+    strncpy(s2s_say_msg.req_text, text.c_str(), SAY_MAX - 1);
+
+    for (const auto& neighbor : neighbors) {
+        if (neighbor.addr.sin_addr.s_addr == source.sin_addr.s_addr &&
+            neighbor.addr.sin_port == source.sin_port) {
+            continue; // Don't send back to source
+        }
+
+        ssize_t bytes = sendto(s, &s2s_say_msg, sizeof(s2s_say_msg), 0, 
+                               (struct sockaddr*)&neighbor.addr, sizeof(neighbor.addr));
+        if (bytes < 0) {
+            perror("Failed to send S2S SAY message to neighbor");
+        }else{
+            printf("%s:%d %s:%d send S2S say %s\n",
+                   inet_ntoa(server.sin_addr), ntohs(server.sin_port), // Local server IP and port
+                   inet_ntoa(neighbor.addr.sin_addr), ntohs(neighbor.addr.sin_port), // Neighbor server IP and port
+                   channel.c_str()); // Channel name
+        }
+    }
+}
+
 
 
 
