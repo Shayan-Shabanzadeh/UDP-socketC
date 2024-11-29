@@ -574,19 +574,24 @@ void handle_s2s_say(void *data, struct sockaddr_in source) {
     string text = s2s_msg->req_text;
     string username = s2s_msg->req_username;
 
-    // TODO this must be randomized
-    // Unique message ID
+    // Generate a unique message ID
     string message_id = channel + ":" + text + ":" + inet_ntoa(source.sin_addr) + ":" + to_string(ntohs(source.sin_port));
 
+    // Check for duplicate messages
     if (seen_message_ids.find(message_id) != seen_message_ids.end()) {
         printf("Duplicate S2S SAY message detected. Ignoring.\n");
         return;
     }
     seen_message_ids.insert(message_id);
 
+    bool has_local_clients = false;
+    bool has_other_subscribers = false;
+
     // Forward to local clients if subscribed
     if (channels.find(channel) != channels.end()) {
         auto& users = channels[channel];
+        has_local_clients = !users.empty(); // Check if there are local clients
+
         for (const auto& [username, client_sock] : users) {
             struct text_say send_msg;
             send_msg.txt_type = TXT_SAY;
@@ -594,7 +599,7 @@ void handle_s2s_say(void *data, struct sockaddr_in source) {
             strncpy(send_msg.txt_username, username.c_str(), USERNAME_MAX - 1);
             strncpy(send_msg.txt_text, text.c_str(), SAY_MAX - 1);
 
-            ssize_t bytes = sendto(s, &send_msg, sizeof(send_msg), 0, 
+            ssize_t bytes = sendto(s, &send_msg, sizeof(send_msg), 0,
                                    (struct sockaddr*)&client_sock, sizeof(client_sock));
             if (bytes < 0) {
                 perror("Failed to forward SAY message to client");
@@ -602,14 +607,35 @@ void handle_s2s_say(void *data, struct sockaddr_in source) {
         }
     }
 
-    // Forward to neighbors if necessary
-    if (!is_subscribed_to_channel(channel, source)) {
-        send_s2s_say(channel, text, username,source);
-    } else {
-        // Send S2S_LEAVE back if no subscribers
+    // Check if other servers are subscribed to the channel
+    if (server_subscriptions.find(channel) != server_subscriptions.end()) {
+        has_other_subscribers = !server_subscriptions[channel].empty();
+    }
+
+    // Decide what to do next
+    if (!has_local_clients && !has_other_subscribers) {
+        // No subscribers, send S2S_LEAVE to the source
+         printf("%s:%d %s:%d send S2S Leave %s\n",
+           inet_ntoa(server.sin_addr), ntohs(server.sin_port), // Local server IP and port
+           inet_ntoa(source.sin_addr), ntohs(source.sin_port), // Source server IP and port
+           channel.c_str()); // Channel name
         send_s2s_leave(channel, source);
+
+        // Remove internal record of this channel
+        if (channels.find(channel) != channels.end()) {
+            channels.erase(channel);
+        }
+        if (server_subscriptions.find(channel) != server_subscriptions.end()) {
+            server_subscriptions.erase(channel);
+        }
+
+        // printf("No subscribers for channel '%s'. Sent S2S_LEAVE and removed channel.\n", channel.c_str());
+    } else {
+        // Forward to neighbors if necessary
+        send_s2s_say(channel, text, username, source);
     }
 }
+
 
 
 void send_s2s_leave(const string& channel, const struct sockaddr_in& dest) {
