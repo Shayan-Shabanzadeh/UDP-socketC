@@ -16,6 +16,13 @@
 #include <set>
 #include <time.h>
 #include <chrono>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sstream>
+#include <iomanip>
 
 
 
@@ -73,13 +80,13 @@ void handle_s2s_join(void *data, struct sockaddr_in origin) ;
 bool is_subscribed_to_channel(const string& channel, const struct sockaddr_in& source);
 
 void send_s2s_join(const string& channel, struct sockaddr_in origin);
-void send_s2s_say(const string& channel, const string& text, const string& username, const struct sockaddr_in& source);
-
+void send_s2s_say(const string& channel, const string& text, const string& username, const struct sockaddr_in& source, const string& message_id);
 void handle_s2s_say(void *data, struct sockaddr_in source) ;
 
 void send_s2s_leave(const string& channel, const struct sockaddr_in& dest);
 void handle_s2s_leave(void *data, struct sockaddr_in source) ;
 
+std::string generate_random_message_id();
 
 
 // Define a structure to hold neighbor server information
@@ -97,6 +104,35 @@ set<string> processed_requests;
 bool is_processed(const string& request_id) {
     return processed_requests.find(request_id) != processed_requests.end();
 }
+
+
+
+#define ID_LENGTH 4
+
+std::string generate_random_message_id() {
+    int random_fd = open("/dev/urandom", O_RDONLY);
+    if (random_fd < 0) {
+        perror("Failed to open /dev/urandom");
+        exit(1);
+    }
+
+    unsigned char random_bytes[ID_LENGTH];
+    ssize_t result = read(random_fd, random_bytes, ID_LENGTH);
+    close(random_fd);
+
+    if (result < ID_LENGTH) {
+        perror("Failed to read enough random bytes");
+        exit(1);
+    }
+
+    // Convert binary to hex string
+    std::ostringstream oss;
+    for (int i = 0; i < ID_LENGTH; ++i) {
+        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(random_bytes[i]);
+    }
+    return oss.str();
+}
+
 
 
 
@@ -584,14 +620,25 @@ void handle_s2s_say(void *data, struct sockaddr_in source) {
     string channel = s2s_msg->req_channel;
     string text = s2s_msg->req_text;
     string username = s2s_msg->req_username;
+    string message_id(s2s_msg->req_message_id);
+    printf("Extracted Message ID: %s\n", message_id.c_str());
 
-    // Generate a unique message ID
-    string message_id = channel + ":" + text + ":" + inet_ntoa(source.sin_addr) + ":" + to_string(ntohs(source.sin_port));
+
 
     // Check for duplicate messages
     if (seen_message_ids.find(message_id) != seen_message_ids.end()) {
-        printf("Duplicate S2S SAY message detected. Ignoring.\n");
-        return;
+        printf("Duplicate S2S SAY message detected. Sending LEAVE for channel '%s'.\n", channel.c_str());
+
+        // Send a LEAVE message to the source server
+        send_s2s_leave(channel, source);
+
+        // Remove the channel from server_subscriptions
+        if (server_subscriptions.find(channel) != server_subscriptions.end()) {
+            server_subscriptions.erase(channel);
+            printf("Server left channel '%s' due to duplicate message.\n", channel.c_str());
+        }
+
+        return; // Stop further processing
     }
     seen_message_ids.insert(message_id);
 
@@ -626,10 +673,10 @@ void handle_s2s_say(void *data, struct sockaddr_in source) {
     // Decide what to do next
     if (!has_local_clients && !has_other_subscribers) {
         // No subscribers, send S2S_LEAVE to the source
-         printf("%s:%d %s:%d send S2S Leave %s\n",
-           inet_ntoa(server.sin_addr), ntohs(server.sin_port), // Local server IP and port
-           inet_ntoa(source.sin_addr), ntohs(source.sin_port), // Source server IP and port
-           channel.c_str()); // Channel name
+        printf("%s:%d %s:%d send S2S Leave %s\n",
+               inet_ntoa(server.sin_addr), ntohs(server.sin_port), // Local server IP and port
+               inet_ntoa(source.sin_addr), ntohs(source.sin_port), // Source server IP and port
+               channel.c_str()); // Channel name
         send_s2s_leave(channel, source);
 
         // Remove internal record of this channel
@@ -639,13 +686,12 @@ void handle_s2s_say(void *data, struct sockaddr_in source) {
         if (server_subscriptions.find(channel) != server_subscriptions.end()) {
             server_subscriptions.erase(channel);
         }
-
-        // printf("No subscribers for channel '%s'. Sent S2S_LEAVE and removed channel.\n", channel.c_str());
     } else {
         // Forward to neighbors if necessary
-        send_s2s_say(channel, text, username, source);
+        send_s2s_say(channel, text, username, source, message_id);
     }
 }
+
 
 
 
@@ -745,6 +791,10 @@ void handle_say_message(void *data, struct sockaddr_in sock)
         return;
     }
 
+    // Generate a random message ID
+    std::string message_id = generate_random_message_id();
+
+
     // Forward the message to all users in the channel
     for (auto& [member_username, member_sock] : channel_users) {
         struct text_say send_msg;
@@ -762,20 +812,28 @@ void handle_say_message(void *data, struct sockaddr_in sock)
         }
     }
 
-     send_s2s_say(channel, text,username, sock);
+     send_s2s_say(channel, text,username, sock , message_id);
 
 }
 
 
 
-void send_s2s_say(const string& channel, const string& text, const string& username, const struct sockaddr_in& source) {
+void send_s2s_say(const string& channel, const string& text, const string& username, const struct sockaddr_in& source, const string& message_id) {
     struct request_s2s_say s2s_say_msg;
     s2s_say_msg.req_type = REQ_S2S_SAY;
 
     // Populate the fields in the S2S SAY message
     strncpy(s2s_say_msg.req_channel, channel.c_str(), CHANNEL_MAX - 1);
+    s2s_say_msg.req_channel[CHANNEL_MAX - 1] = '\0';
+
     strncpy(s2s_say_msg.req_text, text.c_str(), SAY_MAX - 1);
+    s2s_say_msg.req_text[SAY_MAX - 1] = '\0';
+
     strncpy(s2s_say_msg.req_username, username.c_str(), USERNAME_MAX - 1);
+    s2s_say_msg.req_username[USERNAME_MAX - 1] = '\0';
+
+    // Copy the message ID (ensure null-termination for safety)
+    snprintf(s2s_say_msg.req_message_id, sizeof(s2s_say_msg.req_message_id), "%s", message_id.c_str());
 
     for (const auto& neighbor : neighbors) {
         if (neighbor.addr.sin_addr.s_addr == source.sin_addr.s_addr &&
@@ -783,19 +841,21 @@ void send_s2s_say(const string& channel, const string& text, const string& usern
             continue; // Don't send back to source
         }
 
-        // Send the message to the neighbor
         ssize_t bytes = sendto(s, &s2s_say_msg, sizeof(s2s_say_msg), 0,
                                (struct sockaddr*)&neighbor.addr, sizeof(neighbor.addr));
         if (bytes < 0) {
             perror("Failed to send S2S SAY message to neighbor");
         } else {
-            printf("%s:%d %s:%d send S2S say %s\n",
+            printf("%s:%d %s:%d send S2S say %s %s \"%s\" (message_id: %s)\n",
                    inet_ntoa(server.sin_addr), ntohs(server.sin_port), // Local server IP and port
                    inet_ntoa(neighbor.addr.sin_addr), ntohs(neighbor.addr.sin_port), // Neighbor server IP and port
-                   channel.c_str()); // Channel name
+                   username.c_str(), channel.c_str(), text.c_str(), message_id.c_str());
         }
     }
 }
+
+
+
 
 
 
