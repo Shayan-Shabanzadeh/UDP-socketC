@@ -556,8 +556,8 @@ void handle_s2s_join(void *data, struct sockaddr_in origin) {
 
     // Check if the server is already subscribed to the channel
     if (server_subscriptions[channel].count(origin) > 0) {
-        printf("Already subscribed to channel '%s' from %s:%d. Ignoring.\n",
-               channel.c_str(), inet_ntoa(origin.sin_addr), ntohs(origin.sin_port));
+        // printf("Already subscribed to channel '%s' from %s:%d. Ignoring.\n",
+        //        channel.c_str(), inet_ntoa(origin.sin_addr), ntohs(origin.sin_port));
         return; // Stop further processing
     }
 
@@ -770,7 +770,6 @@ void send_s2s_leave(const string& channel, const struct sockaddr_in& dest) {
 
 
 void handle_s2s_leave(void *data, struct sockaddr_in source) {
-    // printf("hello world\n");
     struct request_s2s_leave* leave_msg = (struct request_s2s_leave*)data;
     string channel = leave_msg->req_channel;
 
@@ -778,18 +777,7 @@ void handle_s2s_leave(void *data, struct sockaddr_in source) {
     struct sockaddr_in normalized_source = source;
     memset(&(normalized_source.sin_zero), 0, sizeof(normalized_source.sin_zero));
 
-    // Display the list of channels the server is subscribed to
-    // printf("Current list of subscribed channels:\n");
-    // if (server_subscriptions.empty()) {
-    //     printf("No subscriptions found.\n");
-    // } else {
-    //     for (const auto& [subscribed_channel, subscribers] : server_subscriptions) {
-    //         printf("Channel: %s, Subscriber count: %lu\n",
-    //                subscribed_channel.c_str(), subscribers.size());
-    //     }
-    // }
-
-    // Remove the source from the subscription list for the channel
+    // Remove the source from the server's subscription list for the channel
     if (server_subscriptions.find(channel) != server_subscriptions.end()) {
         auto& subscribers = server_subscriptions[channel];
 
@@ -805,14 +793,15 @@ void handle_s2s_leave(void *data, struct sockaddr_in source) {
                 server_subscriptions.erase(channel);
                 printf("No more subscribers for channel '%s'. Removed from server subscriptions.\n", channel.c_str());
             }
-        } else {
-            // printf("Source %s:%d not found in subscriptions for channel '%s'\n",
-            //        inet_ntoa(source.sin_addr), ntohs(source.sin_port), channel.c_str());
         }
     } else {
         printf("Channel '%s' not found in server subscriptions\n", channel.c_str());
     }
+
+    // Remove the channel from the neighbor's subscriptions
+    remove_channel_from_neighbor(source, channel);
 }
+
 
 
 
