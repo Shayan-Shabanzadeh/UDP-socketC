@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <thread>
 #include <stdlib.h>
 #include <ctype.h>
 #include <fcntl.h>
@@ -23,6 +24,7 @@
 #include <string.h>
 #include <sstream>
 #include <iomanip>
+#include <chrono>
 
 
 
@@ -64,7 +66,7 @@ std::set<std::string> seen_message_ids;
 map<string, set<struct sockaddr_in, sockaddr_in_comparator> > server_subscriptions;
 
 
-
+map<string, map<struct sockaddr_in, std::chrono::steady_clock::time_point, sockaddr_in_comparator> > last_join_timestamps;
 
 void handle_socket_input();
 void handle_login_message(void *data, struct sockaddr_in sock);
@@ -128,8 +130,8 @@ void remove_channel_from_neighbor(struct sockaddr_in neighbor_addr, const string
                 neighbor.subscribed_channels.erase(channel);
                 return;
             } else {
-                printf("Error: Channel '%s' not found for neighbor %s:%d.\n",
-                       channel.c_str(), inet_ntoa(neighbor_addr.sin_addr), ntohs(neighbor_addr.sin_port));
+                // printf("Error: Channel '%s' not found for neighbor %s:%d.\n",
+                //        channel.c_str(), inet_ntoa(neighbor_addr.sin_addr), ntohs(neighbor_addr.sin_port));
                 return;
             }
         }
@@ -153,6 +155,56 @@ vector<Neighbor*> get_neighbors_subscribed_to_channel(const string& channel) {
 
 
 set<string> processed_requests;
+
+void check_for_timeouts() {
+    auto now = std::chrono::steady_clock::now();
+    for (auto& [channel, timestamps] : last_join_timestamps) {
+        for (auto iter = timestamps.begin(); iter != timestamps.end();) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - iter->second).count();
+            if (elapsed >= 20) { // Timeout after 2 minutes (120 seconds)
+                // printf("Timeout: Removing neighbor %s:%d from channel '%s'\n",
+                //        inet_ntoa(iter->first.sin_addr), ntohs(iter->first.sin_port), channel.c_str());
+
+                // Send a leave message to this neighbor
+                send_s2s_leave(channel, iter->first);
+
+                // Remove from neighbors
+                remove_channel_from_neighbor(iter->first, channel);
+
+                // Remove from subscriptions
+                server_subscriptions[channel].erase(iter->first);
+
+                // Remove from timestamps
+                iter = timestamps.erase(iter);
+            } else {
+                // printf("Neighbor %s:%d still active for channel '%s' (elapsed: %ld seconds)\n",
+                //        inet_ntoa(iter->first.sin_addr), ntohs(iter->first.sin_port), channel.c_str(), elapsed);
+                ++iter;
+            }
+        }
+    }
+}
+
+
+
+
+void renew_joins() {
+    for (const auto& [channel, subscribers] : server_subscriptions) {
+        for (const auto& neighbor : neighbors) {
+            // printf("[renew_joins] Sending join for channel '%s' to neighbor %s:%d\n",
+            //        channel.c_str(),
+            //        inet_ntoa(neighbor.addr.sin_addr), ntohs(neighbor.addr.sin_port));
+            
+            // Use the server's own address as the origin
+            send_s2s_join(channel, server);
+        }
+    }
+}
+
+
+
+
+
 
 
 bool is_processed(const string& request_id) {
@@ -188,6 +240,21 @@ std::string generate_random_message_id() {
 }
 
 
+void renew_thread_function() {
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+        printf("[renew_thread] Sending periodic S2S Join messages.\n");
+        renew_joins();
+    }
+}
+
+void timeout_thread_function() {
+    while (true) {
+        printf("[timeout_thread] Checking for timeouts.\n");
+        std::this_thread::sleep_for(std::chrono::seconds(20)); // Check every 10 seconds
+        check_for_timeouts();
+    }
+}
 
 
 
@@ -259,6 +326,14 @@ int main(int argc, char *argv[]) {
     map<string, struct sockaddr_in> default_channel_users;
     channels[default_channel] = default_channel_users;
 
+
+    std::thread timeout_thread(timeout_thread_function);
+    // Start threads for renewals and timeouts
+    std::thread renew_thread(renew_thread_function);
+
+    // Detach the threads so they run independently
+    renew_thread.detach();
+    timeout_thread.detach();
     // Main server loop
     while (1) {
         int rc;
@@ -554,11 +629,13 @@ void handle_s2s_join(void *data, struct sockaddr_in origin) {
         channels[channel] = map<string, struct sockaddr_in>();
     }
 
+    // Update the timestamp for this origin's join
+    last_join_timestamps[channel][origin] = std::chrono::steady_clock::now();
+
     // Check if the server is already subscribed to the channel
     if (server_subscriptions[channel].count(origin) > 0) {
-        // printf("Already subscribed to channel '%s' from %s:%d. Ignoring.\n",
-        //        channel.c_str(), inet_ntoa(origin.sin_addr), ntohs(origin.sin_port));
-        return; // Stop further processing
+        // Server is already subscribed; just update the timestamp
+        return;
     }
 
     // Add the origin to the subscription list
@@ -579,14 +656,17 @@ void send_s2s_join(const string& channel, struct sockaddr_in origin) {
     s2s_join_msg.req_type = REQ_S2S_JOIN;
     strncpy(s2s_join_msg.req_channel, channel.c_str(), CHANNEL_MAX - 1);
     s2s_join_msg.req_channel[CHANNEL_MAX - 1] = '\0';
+    
 
+    // Broadcast the join message to all neighbors
     for (const auto& neighbor : neighbors) {
-        // Skip broadcasting back to the origin
-        if (neighbor.addr.sin_addr.s_addr == origin.sin_addr.s_addr &&
+        // Skip broadcasting back to the origin if origin is valid
+        if (origin.sin_addr.s_addr != 0 && origin.sin_port != 0 &&
+            neighbor.addr.sin_addr.s_addr == origin.sin_addr.s_addr &&
             neighbor.addr.sin_port == origin.sin_port) {
             continue;
         }
-
+ 
         // Send the S2S Join message
         ssize_t bytes = sendto(s, &s2s_join_msg, sizeof(s2s_join_msg), 0,
                                (struct sockaddr*)&neighbor.addr, sizeof(neighbor.addr));
@@ -600,9 +680,13 @@ void send_s2s_join(const string& channel, struct sockaddr_in origin) {
 
             // Update the neighbor's subscribed channels
             add_channel_to_neighbor(neighbor.addr, channel);
+
+            // Update the timestamp for the join message in `join_timestamps`
+            last_join_timestamps[channel][neighbor.addr] = std::chrono::steady_clock::now();
         }
     }
 }
+
 
 
 
