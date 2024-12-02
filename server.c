@@ -296,29 +296,36 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    // Parse neighbors from additional command-line arguments
-    for (int i = 3; i < argc; i += 2) {
-        if (i + 1 >= argc) {
-            printf("Error: Each neighbor must have an IP and a port.\n");
-            exit(1);
-        }
-
-        string neighbor_ip = argv[i];
-        int neighbor_port = atoi(argv[i + 1]);
-
-        struct sockaddr_in neighbor_addr;
-        memset(&neighbor_addr, 0, sizeof(neighbor_addr));
-        neighbor_addr.sin_family = AF_INET;
-        neighbor_addr.sin_port = htons(neighbor_port);
-        inet_pton(AF_INET, "127.0.0.1", &neighbor_addr.sin_addr);
-
-        Neighbor neighbor;
-        neighbor.addr = neighbor_addr;
-        neighbor.ip_port = neighbor_ip + ":" + to_string(neighbor_port);
-        neighbors.push_back(neighbor);
-
-        // printf("Added neighbor: %s:%d\n", neighbor_ip.c_str(), neighbor_port);
+// Parse neighbors from additional command-line arguments
+for (int i = 3; i < argc; i += 2) {
+    if (i + 1 >= argc) {
+        printf("Error: Each neighbor must have an IP and a port.\n");
+        exit(1);
     }
+
+    string neighbor_ip = argv[i];
+    int neighbor_port = atoi(argv[i + 1]);
+
+    struct sockaddr_in neighbor_addr;
+    memset(&neighbor_addr, 0, sizeof(neighbor_addr));
+    neighbor_addr.sin_family = AF_INET;
+    neighbor_addr.sin_port = htons(neighbor_port);
+
+    // Check if neighbor_ip is "localhost" and use 127.0.0.1 in that case
+    if (neighbor_ip == "localhost") {
+        inet_pton(AF_INET, "127.0.0.1", &neighbor_addr.sin_addr);
+    } else {
+        inet_pton(AF_INET, neighbor_ip.c_str(), &neighbor_addr.sin_addr);
+    }
+
+    Neighbor neighbor;
+    neighbor.addr = neighbor_addr;
+    neighbor.ip_port = neighbor_ip + ":" + to_string(neighbor_port);
+    neighbors.push_back(neighbor);
+
+    // printf("Added neighbor: %s:%d\n", neighbor_ip.c_str(), neighbor_port);
+}
+
 
     // printf("Server initialized on %s:%d\n", hostname, port);
 
@@ -769,7 +776,7 @@ void handle_s2s_say(void *data, struct sockaddr_in source) {
             struct text_say send_msg;
             send_msg.txt_type = TXT_SAY;
             strncpy(send_msg.txt_channel, channel.c_str(), CHANNEL_MAX - 1);
-            strncpy(send_msg.txt_username, username.c_str(), USERNAME_MAX - 1);
+            strncpy(send_msg.txt_username, s2s_msg->req_username, USERNAME_MAX - 1);
             strncpy(send_msg.txt_text, text.c_str(), SAY_MAX - 1);
 
             ssize_t bytes = sendto(s, &send_msg, sizeof(send_msg), 0,
