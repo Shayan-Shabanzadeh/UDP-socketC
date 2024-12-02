@@ -24,6 +24,7 @@
 #include <string.h>
 #include <sstream>
 #include <iomanip>
+#include <vector>
 #include <chrono>
 
 
@@ -161,7 +162,7 @@ void check_for_timeouts() {
     for (auto& [channel, timestamps] : last_join_timestamps) {
         for (auto iter = timestamps.begin(); iter != timestamps.end();) {
             auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - iter->second).count();
-            if (elapsed >= 20) { // Timeout after 2 minutes (120 seconds)
+            if (elapsed >= 120) { // Timeout after 120 seconds
                 // printf("Timeout: Removing neighbor %s:%d from channel '%s'\n",
                 //        inet_ntoa(iter->first.sin_addr), ntohs(iter->first.sin_port), channel.c_str());
 
@@ -242,16 +243,16 @@ std::string generate_random_message_id() {
 
 void renew_thread_function() {
     while (true) {
-        std::this_thread::sleep_for(std::chrono::seconds(10));
-        printf("[renew_thread] Sending periodic S2S Join messages.\n");
+        std::this_thread::sleep_for(std::chrono::seconds(60));
+        // printf("[renew_thread] Sending periodic S2S Join messages.\n");
         renew_joins();
     }
 }
 
 void timeout_thread_function() {
     while (true) {
-        printf("[timeout_thread] Checking for timeouts.\n");
-        std::this_thread::sleep_for(std::chrono::seconds(20)); // Check every 10 seconds
+        // printf("[timeout_thread] Checking for timeouts.\n");
+        std::this_thread::sleep_for(std::chrono::seconds(120)); // Check every 10 seconds
         check_for_timeouts();
     }
 }
@@ -857,34 +858,13 @@ void handle_s2s_leave(void *data, struct sockaddr_in source) {
     struct request_s2s_leave* leave_msg = (struct request_s2s_leave*)data;
     string channel = leave_msg->req_channel;
 
-    // Normalize the source address (zero out unused fields for comparison)
-    struct sockaddr_in normalized_source = source;
-    memset(&(normalized_source.sin_zero), 0, sizeof(normalized_source.sin_zero));
-
-    // Remove the source from the server's subscription list for the channel
-    if (server_subscriptions.find(channel) != server_subscriptions.end()) {
-        auto& subscribers = server_subscriptions[channel];
-
-        // Check if the source exists in the subscription list
-        auto iter = subscribers.find(normalized_source);
-        if (iter != subscribers.end()) {
-            subscribers.erase(iter);
-            printf("Removed %s:%d from channel '%s'\n",
-                   inet_ntoa(source.sin_addr), ntohs(source.sin_port), channel.c_str());
-
-            // If no servers are subscribed, clean up
-            if (subscribers.empty()) {
-                server_subscriptions.erase(channel);
-                printf("No more subscribers for channel '%s'. Removed from server subscriptions.\n", channel.c_str());
-            }
-        }
-    } else {
-        printf("Channel '%s' not found in server subscriptions\n", channel.c_str());
-    }
-
     // Remove the channel from the neighbor's subscriptions
     remove_channel_from_neighbor(source, channel);
+
+    // printf("Neighbor %s:%d left channel '%s'.\n",
+    //        inet_ntoa(source.sin_addr), ntohs(source.sin_port), channel.c_str());
 }
+
 
 
 
@@ -1226,10 +1206,6 @@ void send_error_message(struct sockaddr_in sock, string error_msg)
 		//printf("Message sent\n");
 
 	}
-
-
-
-
 
 }
 
