@@ -63,7 +63,7 @@ map<string,int> active_usernames; //0-inactive , 1-active
 map<string,string> rev_usernames; //<ip+port in string, username>
 map<string,channel_type> channels;
 
-std::set<std::string> seen_message_ids;
+std::set<uint64_t> seen_message_ids;
 map<string, set<struct sockaddr_in, sockaddr_in_comparator> > server_subscriptions;
 
 
@@ -83,14 +83,13 @@ void handle_s2s_join(void *data, struct sockaddr_in origin) ;
 bool is_subscribed_to_channel(const string& channel, const struct sockaddr_in& source);
 
 void send_s2s_join(const string& channel, struct sockaddr_in origin);
-void send_s2s_say(const string& channel, const string& text, const string& username, const struct sockaddr_in& source, const string& message_id);
+void send_s2s_say(const string& channel, const string& text, const string& username, const struct sockaddr_in& source, uint64_t message_id);
 void handle_s2s_say(void *data, struct sockaddr_in source) ;
 
 void send_s2s_leave(const string& channel, const struct sockaddr_in& dest);
 void handle_s2s_leave(void *data, struct sockaddr_in source) ;
 
-std::string generate_random_message_id();
-
+uint64_t generate_random_message_id();
 
 // Define a structure to hold neighbor server information
 struct Neighbor {
@@ -214,31 +213,26 @@ bool is_processed(const string& request_id) {
 
 
 
-#define ID_LENGTH 4
 
-std::string generate_random_message_id() {
+uint64_t generate_random_message_id() {
     int random_fd = open("/dev/urandom", O_RDONLY);
     if (random_fd < 0) {
         perror("Failed to open /dev/urandom");
         exit(1);
     }
 
-    unsigned char random_bytes[ID_LENGTH];
-    ssize_t result = read(random_fd, random_bytes, ID_LENGTH);
+    uint64_t random_id;
+    ssize_t result = read(random_fd, &random_id, sizeof(random_id));
     close(random_fd);
 
-    if (result < ID_LENGTH) {
+    if (result < sizeof(random_id)) {
         perror("Failed to read enough random bytes");
         exit(1);
     }
 
-    // Convert binary to hex string
-    std::ostringstream oss;
-    for (int i = 0; i < ID_LENGTH; ++i) {
-        oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(random_bytes[i]);
-    }
-    return oss.str();
+    return random_id;
 }
+
 
 
 void renew_thread_function() {
@@ -418,10 +412,25 @@ void handle_socket_input() {
             case REQ_LEAVE:
                 printf("Request leave %s\n", ((struct request_leave*)data)->req_channel);
                 break;
-            case REQ_SAY:
-                printf("Request say %s \"%s\"\n", ((struct request_say*)data)->req_channel,
-                       ((struct request_say*)data)->req_text);
+            case REQ_SAY: {
+                const char* channel = ((struct request_say*)data)->req_channel;
+                const char* text = ((struct request_say*)data)->req_text;
+
+                // Extract username from the client key
+                char port_str[6];
+                sprintf(port_str, "%d", port);
+                string key = ip + ":" + port_str;
+                auto iter = rev_usernames.find(key);
+
+                if (iter != rev_usernames.end()) {
+                    string username = iter->second;
+                    printf("Request say %s %s \"%s\"\n", username.c_str(), channel, text);
+                } else {
+                    printf("say Unknown_User %s \"%s\"\n", channel, text);
+                }
                 break;
+            }
+
             case REQ_LIST:
                 printf("Request list\n");
                 break;
@@ -753,7 +762,7 @@ void handle_s2s_say(void *data, struct sockaddr_in source) {
     string channel = s2s_msg->req_channel;
     string text = s2s_msg->req_text;
     string username = s2s_msg->req_username;
-    string message_id(s2s_msg->req_message_id);
+    uint64_t message_id = s2s_msg->req_message_id;
 
     // Check for duplicate messages
     if (seen_message_ids.find(message_id) != seen_message_ids.end()) {
@@ -925,7 +934,9 @@ void handle_say_message(void *data, struct sockaddr_in sock)
     }
 
     // Generate a random message ID
-    std::string message_id = generate_random_message_id();
+    // TODO 
+    uint64_t raw_message_id = generate_random_message_id();
+
 
 
     // Forward the message to all users in the channel
@@ -945,13 +956,13 @@ void handle_say_message(void *data, struct sockaddr_in sock)
         }
     }
 
-     send_s2s_say(channel, text,username, sock , message_id);
+     send_s2s_say(channel, text,username, sock , raw_message_id);
 
 }
 
 
 
-void send_s2s_say(const string& channel, const string& text, const string& username, const struct sockaddr_in& source, const string& message_id) {
+void send_s2s_say(const string& channel, const string& text, const string& username, const struct sockaddr_in& source, uint64_t message_id) {
     struct request_s2s_say s2s_say_msg;
     s2s_say_msg.req_type = REQ_S2S_SAY;
 
@@ -966,7 +977,7 @@ void send_s2s_say(const string& channel, const string& text, const string& usern
     s2s_say_msg.req_username[USERNAME_MAX - 1] = '\0';
 
     // Copy the message ID (ensure null-termination for safety)
-    snprintf(s2s_say_msg.req_message_id, sizeof(s2s_say_msg.req_message_id), "%s", message_id.c_str());
+    s2s_say_msg.req_message_id = message_id;
 
     for (const auto& neighbor : neighbors) {
         if (neighbor.addr.sin_addr.s_addr == source.sin_addr.s_addr &&

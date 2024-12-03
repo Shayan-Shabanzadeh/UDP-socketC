@@ -31,8 +31,8 @@ typedef int text_t;
 #define REQ_WHO 6
 #define REQ_KEEP_ALIVE 7 /* Only needed by graduate students */
 #define REQ_S2S_JOIN 8 
-#define REQ_S2S_SAY 9
-#define REQ_S2S_LEAVE 10
+#define REQ_S2S_SAY 10
+#define REQ_S2S_LEAVE 9 
 
 /* Define codes for text types.  These are the messages sent to the client. */
 #define TXT_SAY 0
@@ -56,11 +56,11 @@ struct request_login {
 
 
 struct request_s2s_say {
-    request_t req_type;               /* = REQ_S2S_SAY */
-    char req_channel[CHANNEL_MAX];   /* Channel name */
-    char req_text[SAY_MAX];          /* Message text */
-    char req_message_id[64];         /* Unique message ID */
-    char req_username[USERNAME_MAX]; /* Client username */
+    request_t req_type;               /* 32-bit message type identifier (10) */
+    uint64_t req_message_id;         /* 64-bit unique identifier */
+    char req_username[USERNAME_MAX]; /* 32-byte username (padded or null-terminated) */
+    char req_channel[CHANNEL_MAX];   /* 32-byte channel name (padded or null-terminated) */
+    char req_text[SAY_MAX];          /* 64-byte text field (padded or null-terminated) */
 } packed;
 
 
